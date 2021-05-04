@@ -5,6 +5,7 @@ Replaces the internal links in a paper pdf with NASA ADS links. Will require som
 * pdfminer
 * pdfrw
 * astroquery
+* [anystyle command line tool](https://anystyle.io/)
 
 ## Usage
 `python pdf_cite_analyzer.py <input file> <output file>`
