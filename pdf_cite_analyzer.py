@@ -474,11 +474,11 @@ finalCites = []
 
 #Now that we know where the citations are, lets parse that page
 for citePageNum in citePageNums:
-	refPageText = []
 	for page in PDFPage.get_pages(document):
 		interpreter.process_page(page)
 		if getPageNumWithPageObj(page) != citePageNum:
 			continue
+		refPageText = []
 		print("On citation page, attempting to parse")
 		layout = device.get_result()
 		for element in layout:
