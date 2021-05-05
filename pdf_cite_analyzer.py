@@ -33,7 +33,8 @@ na.ADS.NROWS = 20
 # change the sort order
 na.ADS.SORT = 'bibcode desc'
 # change the fields that are returned (enter as strings in a list)
-na.ADS.ADS_FIELDS = ['title','abstract','pubdate', 'bibcode']
+# We only need the title and bibcode
+na.ADS.ADS_FIELDS = ['title', 'bibcode']
 
 linksDict = {}
 pageObjIds = []
@@ -42,6 +43,7 @@ pageIds = []
 class Link(object):
 	__slots__ = 'prev', 'next', 'key', '__weakref__'
 
+#Used to clean up inline citations
 class OrderedSet(collections.MutableSet):
 	'Set the remembers the order elements were added'
 	# Big-O running times for all methods are the same as for regular sets.
@@ -115,7 +117,7 @@ class OrderedSet(collections.MutableSet):
 			return len(self) == len(other) and list(self) == list(other)
 		return not self.isdisjoint(other)
 
-
+#Turn the pdf tree into something manipulatable by python
 class destTreeNode:
 	def __init__(self,curD):
 		if type(curD) == PDFObjRef:
@@ -128,6 +130,8 @@ class destTreeNode:
 					cK = destTreeNode(uK)
 					self.kids.append(cK)
 
+#We will need to break up the page into columns
+#Before breaking it up into paragraphs
 class textColumn:
 	def __init__(self,firstElem,thres=30.0):
 		self.minX = firstElem[1][0]
@@ -167,6 +171,10 @@ class textColumn:
 		topC = self.children[0]
 		return abs(topC[1][3] - topC[1][1])
 
+
+#Use element position syntax while
+#using the list position format
+#that the objects in this script use
 class posObj:
 	def __init__(self,pos):
 		self.posList = pos
@@ -175,6 +183,13 @@ class posObj:
 		self.x1 = pos[2]
 		self.y1 = pos[3]
 
+#The mega object which needs to
+#store data about itself due to the number of
+#steps needed between extracting the inline citations
+#connecting them to a citation on the citation page
+#parsing the citation, then searching ADS for
+#that citation; then finally replacing the
+#GOTO inline links with an ADS link
 class linkObj:
 	def __init__(self, annoObj, uri, pos, pageid):
 		self.origObjs = [annoObj]
@@ -238,26 +253,7 @@ class linkObj:
 	def getPaperLink(self):
 		return self.papLink
 
-class historyBuff:
-	def __init__(self, size_):
-		self.size = size_
-		self.items = []
-
-	def add(self,item):
-		if (len(self.items) + 1) > self.size:
-			tempItems = self.items[1:]
-			tempItems.append(item)
-			self.items = tempItems
-		else:
-			self.items.append(item)
-
-	def get(self,hisI):
-		if hisI > self.size:
-			return None
-		else:
-			backI = len(self.items) - hisI - 1
-			return self.items[backI]
-
+#Arbitrary element selector for a command-line interface
 def arraySelector(array, question,itemPrint = lambda x: x,itemOutput= lambda x:x,autoSelect = lambda x: False):
 	for item in array:
 		if autoSelect(item):
@@ -281,7 +277,7 @@ def arraySelector(array, question,itemPrint = lambda x: x,itemOutput= lambda x:x
 		except ValueError:
 			print("That's not an number!")
 
-
+#parses a LTTextBoxHorizontal into a list of lines of text
 def getText(element):
 	retLines = []
 	curLine = ""
@@ -296,14 +292,35 @@ def getText(element):
 	return retLines
 
 
-
+#The "page" object has a pageid, which
+#we can use to figure out the page number (after processing the document)
 def getPageNumWithPageObj(pageObj):
 	global pageObjIds
 	return (pageObjIds.index(pageObj.pageid) + 1)
 
+#goto links don't reference the "page" object of thier target location,
+#instead refernce the pdfstream object of thier target location; so
+#use that instead after building the document tree
 def getPageNumber(pageCont):
 	global pageIds
 	return (pageIds.index(pageCont.objid) + 1)
+
+#build the page order of pdfstream objects inside a goto link
+def analyzeKids(curNode):
+	global pageIds
+	if len(curNode.kids) > 0:
+		for kid in curNode.kids:
+			analyzeKids(kid)
+	else:
+		selfRepCon = curNode.selfRep["Contents"]
+		if type(selfRepCon) == PDFObjRef:
+			pageIds.append(selfRepCon.objid)
+		elif type(selfRepCon) == list:
+			pageIds.append(selfRepCon[0].objid)
+		else:
+			print("ERROR! Unknown type for document tree construction")
+			print(selfRepCon)
+			sys.exit(0)
 
 parser = argparse.ArgumentParser(
 	description='This program replaces the citation links inside a pdf which just goes to the page with the ADS abstract link'
@@ -316,6 +333,7 @@ args = parser.parse_args()
 inputPDFDocName = args.input
 outputPDFDocName = args.output
 
+#Standard reciepe
 document = open(inputPDFDocName, 'rb')
 #Create resource manager
 rsrcmgr = PDFResourceManager()
@@ -328,7 +346,7 @@ interpreter = PDFPageInterpreter(rsrcmgr, device)
 parser = PDFParser(document)
 doc = PDFDocument(parser)
 
-
+#Get links and thier positions, and put that info into custom objects
 for page in PDFPage.get_pages(document):
 	interpreter.process_page(page)
 	# receive the LTPage object for the page.
@@ -350,10 +368,13 @@ for page in PDFPage.get_pages(document):
 				else:
 					linksDict[uri] = linkObj(annotation, uri, position, page.pageid )
 
+# get the pageid order in the document
 for page in PDFPage.get_pages(document):
 	interpreter.process_page(page)
 	pageObjIds.append(page.pageid)
 
+# now that we have all the links in the document
+# lets go back and figure out which text is inside them
 prevChar = None
 for page in PDFPage.get_pages(document):
 	interpreter.process_page(page)
@@ -378,6 +399,10 @@ for page in PDFPage.get_pages(document):
 			if changedLinkObj:
 				linksDict[linkKey].increaseText()
 
+#The destinations of the links in the link object are
+#names which reference destinations in the document catalog
+#so we need to parse the "Dest" portion of the document
+#catalog and connect it to a link above
 names = dict_value(doc.catalog["Names"])
 dests = dict_value(names["Dests"])
 destTree = destTreeNode(dests)
@@ -387,6 +412,7 @@ for x in destTree.kids:
 	for y in x.kids:
 		nA = list(y.selfRep["Names"])
 		curkey = ""
+		#At this level they are in a list of [<key> <value> <key 2> <value 2> ...]
 		for nI, nn in enumerate(nA):
 			if not (nI % 2):
 				curkey = nA[nI].decode("utf-8")
@@ -398,20 +424,26 @@ for x in destTree.kids:
 
 testK = list(destD.keys())[0]
 
-pageTree = destTreeNode(destD[testK][0].resolve()["Parent"].resolve()["Parent"].resolve())
-for x in pageTree.kids:
-	for y in x.kids:
-		selfRepCon = y.selfRep["Contents"]
-		if type(selfRepCon) == PDFObjRef:
-			pageIds.append(selfRepCon.objid)
-		elif type(selfRepCon) == list:
-			pageIds.append(selfRepCon[0].objid)
-		else:
-			print("ERROR! Unknown type for document tree construction")
-			print(selfRepCon)
-			sys.exit(0)
+curDD = destD[testK][0].resolve()
+#Go to the top of the Dest tree
+while True:
+	if "Parent" in curDD.keys():
+		curDD = curDD["Parent"].resolve()
+	else:
+		break
 
+#Go down the tree and figure out which object refers to which
+#page number
+pageTree = destTreeNode(curDD)
+analyzeKids(pageTree)
 
+#Finally figure out which page those inline links go to.
+#This is so we don't analyze the entire document and
+#get even more errors and false positives
+#Unfortuantly the "XYZ" part of the destination object
+#refers to the position of top-left corner of the rendering window
+#when clicked, so is useless for our purposes and will have to
+#deal with the entire page (which is fine)
 for linkName, linkDest in destD.items():
 	linkDestContents = linkDest[0].resolve()["Contents"]
 	destPageNum = 0
@@ -429,15 +461,18 @@ for linkName, linkDest in destD.items():
 	except KeyError:
 		print(f"Warning! {linkName} does not have an associated GOTO link in document")
 
-
+#In most papers, cite links are actually preceeded by "cite"
 citePageNums = set([x.getDestPage() for x in linksDict.values() if "cite" in x.getURI()])
 
+# Troubleshooting output
 print("Citation Page Numbers : ",citePageNums)
 
-prog = re.compile("^\s*\d{2,4}\s*$")
+#Line number removal
+#prog = re.compile("^\s*\d{2,4}\s*$")
 
 finalCites = []
 
+#Now that we know where the citations are, lets parse that page
 for citePageNum in citePageNums:
 	refPageText = []
 	for page in PDFPage.get_pages(document):
@@ -445,54 +480,59 @@ for citePageNum in citePageNums:
 		if getPageNumWithPageObj(page) != citePageNum:
 			continue
 		print("On citation page, attempting to parse")
-		# receive the LTPage object for the page.
 		layout = device.get_result()
 		for element in layout:
 			if type(element) == LTTextBoxHorizontal:
 				curLineTextA = getText(element)
 				for curLineText in curLineTextA:
-					if prog.match(curLineText[0]) is None:
-						refPageText.append(curLineText)
+					#Line number removal
+					#if prog.match(curLineText[0]) is None:
+					refPageText.append(curLineText)
+		#Split the page into columns
+		pageColumns = [textColumn(refPageText.pop())]
 
-	pageColumns = [textColumn(refPageText.pop())]
-
-	for part in refPageText:
-		addChildIn = -1
-		for testIn, col in enumerate(pageColumns):
-			if col.inCol(part):
-				addChildIn = testIn
-		if addChildIn > -1:
-			pageColumns[addChildIn].addChild(part)
-		else:
-			pageColumns.append(textColumn(part))
-
-	for tColI in range(len(pageColumns)):
-		pageColumns[tColI].organizeChildren()
-
-	for tCol in pageColumns:
-		tColLevels = set()
-		for chilI, chil in enumerate(tCol.getChildren()):
-			tColLevels.add(int(chil[1][0]))
-
-		tColLevels = list(tColLevels)
-		tColLevels.sort()
-
-		pastLevel = -1
-		chilBlocks = []
-		curChilBlock = -1
-		for chilI, chil in enumerate(tCol.getChildren()):
-			curLevel = tColLevels.index(int(chil[1][0]))
-			if curLevel > 1:
-				continue
-			if curLevel == 0:
-				chilBlocks.append([chil])
-				curChilBlock += 1
+		for part in refPageText:
+			addChildIn = -1
+			for testIn, col in enumerate(pageColumns):
+				if col.inCol(part):
+					addChildIn = testIn
+			if addChildIn > -1:
+				pageColumns[addChildIn].addChild(part)
 			else:
-				chilBlocks[curChilBlock].append(chil)
-			pastLevel = curLevel
+				pageColumns.append(textColumn(part))
 
-		for block in chilBlocks:
-			finalCites.append("".join([x[0] for x in block]))
+		for tColI in range(len(pageColumns)):
+			pageColumns[tColI].organizeChildren()
+
+		#Split the page into blocks
+		for tCol in pageColumns:
+			tColLevels = set()
+			for chilI, chil in enumerate(tCol.getChildren()):
+				tColLevels.add(int(chil[1][0]))
+
+			tColLevels = list(tColLevels)
+			tColLevels.sort()
+
+			lastHeight = 9999
+			pastLevel = 99
+			chilBlocks = []
+			curChilBlock = -1
+			print(tColLevels)
+			for chilI, chil in enumerate(tCol.getChildren()):
+				curChilHeight = int(chil[1][1])
+				lineHDiff = abs(curChilHeight - lastHeight)
+				curLevel = tColLevels.index(int(chil[1][0]))
+				print(curLevel)
+				if (curLevel < pastLevel) or (lineHDiff > heightThresh):
+					chilBlocks.append([chil])
+					curChilBlock += 1
+				else:
+					chilBlocks[curChilBlock].append(chil)
+				pastLevel = curLevel
+				lastHeight = curChilHeight
+			#add the final blocks of text to a list
+			for block in chilBlocks:
+				finalCites.append("".join([x[0] for x in block]))
 
 finalCites.sort()
 
@@ -515,16 +555,19 @@ inA = jsonStrIn.split("\n")
 preRepRules = []
 postRepRules = []
 usingPost = False
-with open("replace_rules.txt","r", errors = 'ignore') as fp:
-	for line in fp:
-		line = line.strip()
-		if line == ";;;":
-			usingPost = True
-		else:
-			if usingPost:
-				postRepRules.append(line.split(" -> "))
+try:
+	with open("replace_rules.txt","r", errors = 'ignore') as fp:
+		for line in fp:
+			line = line.strip()
+			if line == ";;;":
+				usingPost = True
 			else:
-				preRepRules.append(line.split(" -> "))
+				if usingPost:
+					postRepRules.append(line.split(" -> "))
+				else:
+					preRepRules.append(line.split(" -> "))
+except FileNotFoundError:
+	pass
 
 print("Rules from replace_rules.txt")
 print("Pre-rules : ", preRepRules)
@@ -559,6 +602,8 @@ for linkKey, linkObj in linksDict.items():
 		continue
 	citationDict = {}
 	for citeI, unProcessedCite in enumerate(inA):
+		if len(unProcessedCite) > 500:
+			continue
 		if (authorPart in unProcessedCite) and (yearPart in unProcessedCite):
 			unparseCite = inA[citeI]
 			citationDict = citeParsed[citeI]
