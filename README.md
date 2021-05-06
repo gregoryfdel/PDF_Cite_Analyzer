@@ -1,10 +1,11 @@
 # PDF Cite Analyzer
-Replaces the internal links in a paper pdf with NASA ADS links. Will require some changes from paper to paper, so recommended familiarity with python. 
+Replaces the internal links in a paper pdf with NASA ADS links. Will require some changes from paper to paper, so recommended familiarity with python.
 
 ## Requirements
-* pdfminer
-* pdfrw
-* astroquery
+* [pdfminer](https://github.com/pdfminer/pdfminer.six); [pypi](https://pypi.org/project/pdfminer.six/)
+* [pdfrw](https://github.com/pmaupin/pdfrw); [pypi](https://pypi.org/project/pdfrw/)
+* [astroquery](https://astroquery.readthedocs.io/en/latest/)
+* [tzlocal](https://github.com/regebro/tzlocal); [pypi](https://pypi.org/project/tzlocal/)
 * [anystyle command line tool](https://anystyle.io/)
 
 ## Usage

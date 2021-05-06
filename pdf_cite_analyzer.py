@@ -20,6 +20,12 @@ import json
 from urllib import error as urlerror
 import argparse
 import math
+from datetime import datetime
+import requests
+import urllib.parse
+
+import tzlocal  # $ pip install tzlocal
+
 
 from astroquery import nasa_ads as na
 # if you don't store your token as an environment variable
@@ -42,29 +48,31 @@ if adsToken != "":
 	na.ADS.TOKEN = adsToken
 else:
 	print("Warning! ADS Token is empty, ensure using an enviromental variable or create the 'ads_token.txt' file and place in there")
+	ans = input("Would you like to quit [y/n] >")
+	if ans == "y":
+		sys.exit(0)
+	else:
+		pass
 # by default, the top 10 records are returned, sorted in
 # reverse chronological order. This can be changed
 
-# change the number of rows returned
-na.ADS.NROWS = 20
-# change the sort order
-na.ADS.SORT = 'bibcode desc'
 # change the fields that are returned (enter as strings in a list)
 # We only need the title and bibcode
 na.ADS.ADS_FIELDS = ['title', 'bibcode']
 
-#If you want rate limit info, change to true with ads package installed
-if False:
-	import ads as adsPack
-	adsPack.config.token = na.ADS.TOKEN
-	r = adsPack.RateLimits('SearchQuery')
-	print("========================")
-	print("ADS Rate Limit Info")
-	limitInfo = r.get_info()
-	print("Current Query Limit : ",limitInfo["limit"])
-	print(f"Query Amount Remaining : ",limitInfo["remaining"])
-	print("========================")
+#How many more queries can we make today?
+getStarRes = na.ADS.query_simple("star",get_raw_response=True)
+starHeadDict = getStarRes.headers
 
+resetTimestamp = float(starHeadDict["X-RateLimit-Reset"])
+local_timezone = tzlocal.get_localzone() # get pytz timezone
+resetLocalTime = datetime.fromtimestamp(resetTimestamp, local_timezone)
+print("========================")
+print("ADS Rate Limit Info")
+print("Current Query Limit : ",starHeadDict["X-RateLimit-Limit"])
+print("Query Amount Remaining : ",starHeadDict["X-RateLimit-Remaining"])
+print("Will reset at ",resetLocalTime.strftime("%Y-%m-%d %H:%M %p (%Z)"))
+print("========================")
 
 linksDict = {}
 pageObjIds = []
@@ -399,6 +407,13 @@ def analyzeKids(curNode):
 			print(selfRepCon)
 			sys.exit(0)
 
+#Helper with author extraction
+def isNone(test):
+	if test is None:
+		return 0
+	else:
+		return 1
+
 parser = argparse.ArgumentParser(
 	description='This program replaces the citation links inside a pdf which just goes to the page with the ADS abstract link'
 )
@@ -621,7 +636,7 @@ for citePageNum in citePageNums:
 				lastHeight = curChilHeight
 			#Add blocks to the final citations list
 			for block in chilBlocks:
-				finalCites.append("".join([x[0] for x in block]))
+				finalCites.append("".join([x[0].replace("- ","") for x in block]))
 
 finalCites.sort()
 
@@ -730,25 +745,35 @@ for linkKey, linkObj in linksDict.items():
 
 	adsParts = {"author":""}
 	for authorD in citeParse["author"]:
-		if "family" in authorD.keys():
+		if ("family" in authorD.keys()) and ('given' in authorD.keys()):
 			if authorD["family"] == "Collaboration":
 				continue
 			authName = authorD['family']
 			authGiven = authorD['given']
-
-			authNameC = ""
-			authNameA = authName.split(" ")
-			for authNamePart in authNameA:
-				authNamePartNP = authNamePart.replace(".","")
-				if len(authNamePartNP) == 1:
-					authGiven = authNamePart + " " + authGiven
-					continue
-				authNameC += authNamePart
-			authName = authNameC
+			authName = authName.replace(",","").strip()
+			authGiven = authGiven.replace(",","").strip()
 			if "particle" in authorD.keys():
 				authName = authName["particle"] + " " + authName
-			#Author Names are complicated, it can either be First Last or Last, First; and we literally don't know
-			adsParts["author"] += f" author:(\"{authName}, {authGiven}\" OR \"{authGiven} {authName}\")"
+
+			failSafe = ""
+			for citePart in unparseStr.split(","):
+				nameParts = f"{authName} {authGiven}".split(" ")
+				isInCitePart = [isNone(re.search(x,citePart)) for x in nameParts]
+				if sum(isInCitePart) == len(nameParts):
+					oneLetterPart = ""
+					nonOneLetterPart = ""
+					unParseParts = [x.strip() for x in citePart.split()]
+					for unParsePart in unParseParts:
+						npp = unParsePart.replace(".","")
+						if len(npp) == 1:
+							oneLetterPart += unParsePart + " "
+						else:
+							nonOneLetterPart += unParsePart + " "
+					citePart = f"{oneLetterPart}{nonOneLetterPart}".strip()
+					failSafe = f" OR \"{citePart}\""
+					break
+			#Author Names are complicated, it can either be First Last or Last, First or Last First; we literally can't tell
+			adsParts["author"] += f" author:(\"{authName}, {authGiven}\" OR \"{authGiven} {authName}\"{failSafe})"
 
 	if 'date' in citeParse.keys():
 		adsParts["year"] = f" year:{citeParse['date'][0]}"
@@ -766,7 +791,7 @@ for linkKey, linkObj in linksDict.items():
 			adsParts["bibstem"] = f" bibstem:{testBibstem}"
 
 	if "pages" in citeParse.keys():
-		orgPage = citeParse['pages'][0]
+		orgPage = citeParse['pages'][0].split()[-1]
 		pageCharCheck = re.compile(f"[A-Z]?{orgPage}[A-Z]?(?:\.?)")
 		pageNumP = pageCharCheck.findall(unparseStr)[0].strip()
 		adsParts["page"] = f" (page:{orgPage} OR page:{pageNumP})"
@@ -778,36 +803,47 @@ for linkKey, linkObj in linksDict.items():
 	if "arxiv" in citeParse.keys():
 		adsParts["arxiv"] = f" arxiv:{citeParse['arxiv'][0]}"
 
-	if "doi" in citeParse.keys():
-		adsParts["doi"] = f" doi:\"{citeParse['doi'][0]}\""
-
 	papers = []
-	try:
-		if "arxiv" in adsParts.keys():
-			adsSearchString = adsParts["arxiv"].strip()
-		elif "doi" in adsParts.keys():
-			adsSearchString = adsParts["doi"].strip()
-		else:
-			adsSearchString = "".join(list(adsParts.values()))
-		papers = na.ADS.query_simple(adsSearchString)
-		print(adsSearchString)
-	except Exception as e:
-		print(e)
-		attempts = [["page"],["bibstem"],["volume"],["volume","page"],["volume","page","bibstem"]]
-		for attempt in attempts:
-			try:
-				time.sleep(3)
-				attAdsParts = {}
-				for attK, attV in adsParts.items():
-					if not attK in attempt:
-						attAdsParts[attK] = attV
-				adsSearchString = "".join(list(attAdsParts.values()))
-				papers = na.ADS.query_simple(adsSearchString)
-				print(adsSearchString)
-				break
-			except Exception as e:
-				print(e)
-				continue
+	if "doi" in citeParse.keys():
+		#This requires messy handling because doi's contain /
+		doiSearch = f'doi:\"{citeParse["doi"][0]}\"'
+		doiSearchqp = urllib.parse.quote_plus(doiSearch)
+		request_fields = na.ADS._fields_to_url()
+		request_sort = na.ADS._sort_to_url()
+		request_rows = na.ADS._rows_to_url(na.ADS.NROWS, na.ADS.NSTART)
+		doiRequestURL = na.ADS.QUERY_SIMPLE_URL + "q=" + doiSearchqp + request_fields + request_sort + request_rows
+		response = na.ADS._request(method='GET', url=doiRequestURL, headers={'Authorization': 'Bearer ' + na.ADS._get_token()}, timeout=na.ADS.TIMEOUT)
+		try:
+			response.raise_for_status()
+			papers = na.ADS._parse_response(response.json())
+			print(doiSearch)
+		except:
+			pass
+	if len(papers) == 0:
+		try:
+			if "arxiv" in adsParts.keys():
+				adsSearchString = adsParts["arxiv"].strip()
+			else:
+				adsSearchString = "".join(list(adsParts.values())).strip()
+			papers = na.ADS.query_simple(adsSearchString)
+			print(adsSearchString)
+		except Exception as e:
+			print(e)
+			attempts = [["page"],["bibstem"],["volume"],["volume","page"],["volume","page","bibstem"]]
+			for attempt in attempts:
+				try:
+					time.sleep(3)
+					attAdsParts = {}
+					for attK, attV in adsParts.items():
+						if not attK in attempt:
+							attAdsParts[attK] = attV
+					adsSearchString = "".join(list(attAdsParts.values())).strip()
+					papers = na.ADS.query_simple(adsSearchString)
+					print(adsSearchString)
+					break
+				except Exception as e:
+					print(e)
+					continue
 	if len(papers) > 1:
 		print("----------------------------------")
 		print("More than 1 paper!")
