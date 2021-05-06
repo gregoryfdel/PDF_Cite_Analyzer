@@ -19,12 +19,22 @@ import subprocess
 import json
 from urllib import error as urlerror
 import argparse
+import math
 
 from astroquery import nasa_ads as na
 # if you don't store your token as an environment variable
 # or in a file, give it here
-na.ADS.TOKEN = ''
+adsToken = ''
 
+if adsToken == '':
+	try:
+		with open("ads_token.txt",'r') as fp:
+			for line in fp:
+				token = line.strip()
+	except:
+		pass
+
+na.ADS.TOKEN = adsToken
 # by default, the top 10 records are returned, sorted in
 # reverse chronological order. This can be changed
 
@@ -133,7 +143,7 @@ class destTreeNode:
 #We will need to break up the page into columns
 #Before breaking it up into paragraphs
 class textColumn:
-	def __init__(self,firstElem,thres=30.0):
+	def __init__(self,firstElem,thres=15.0):
 		self.minX = firstElem[1][0]
 		self.maxX = firstElem[1][2]
 		self.threshold = thres
@@ -141,7 +151,7 @@ class textColumn:
 		self.flag = 0
 
 	def inCol(self,testEle):
-		if abs(testEle[1][0] - self.minX) < self.threshold:
+		if (testEle[1][0] <= (self.maxX + self.threshold)) and (self.minX <= (testEle[1][2] - self.threshold)):
 			if testEle[1][0] < self.minX:
 				self.minX = testEle[1][0]
 			if testEle[1][2] > self.maxX:
@@ -153,23 +163,68 @@ class textColumn:
 		self.children.append(testEle)
 		self.flag = 0
 
-	def organizeChildren(self):
-		if self.flag == 0:
+	def organizeChildren(self, forceRebuild=False):
+		if (self.flag == 0) or forceRebuild:
 			copyChil = self.children.copy()
 			self.children = sorted(copyChil, key=lambda x: x[1][1], reverse=True)
 			self.flag = 1
 
 	def getChildren(self):
-		if self.flag == 0:
-			self.organizeChildren()
+		self.organizeChildren()
 		return self.children
 
-	def getLineHeight(self):
+	def getLineHeight(self,eps=5):
 		if len(self.children) == 0:
 			print("Please add children")
 			return -1
-		topC = self.children[0]
-		return abs(topC[1][3] - topC[1][1])
+		lineHeights = []
+		for child in self.children:
+			lineHeights.append(abs(child[1][3] - child[1][1]))
+		avgHeight = sum(lineHeights)/len(lineHeights)
+		return avgHeight + eps
+
+	def _buildLine(self, curLine):
+		nBoxes = len(curLine) - 1
+		newBBox = [99999,99999,-99999,-99999]
+		newLineStr = ""
+		for boxI, box in enumerate(curLine):
+			addSpace = ""
+			if boxI != nBoxes:
+				addSpace = " "
+			newLineStr += box[0] + addSpace
+			curBBox = box[1]
+			#x0
+			if curBBox[0] < newBBox[0]:
+				newBBox[0] = curBBox[0]
+			#y0
+			if curBBox[1] < newBBox[1]:
+				newBBox[1] = curBBox[1]
+			#x1
+			if curBBox[2] > newBBox[2]:
+				newBBox[2] = curBBox[2]
+			#y1
+			if curBBox[3] > newBBox[3]:
+				newBBox[3] = curBBox[3]
+		return (newLineStr,newBBox)
+
+	def checkForBadLines(self):
+		childWithYs = {}
+		for child in self.children:
+			curChildY0 = math.floor(child[1][1])
+			if curChildY0 in childWithYs.keys():
+				#we are on a already examined line
+				childWithYs[curChildY0].append(child)
+			else:
+				#we are on a different line
+				childWithYs[curChildY0] = [child]
+		newChildList = []
+		for childArr in childWithYs.values():
+			stitchedLine = self._buildLine(childArr)
+			newChildList.append(stitchedLine)
+		self.children = newChildList.copy()
+		self.organizeChildren(True)
+
+
 
 
 #Use element position syntax while
@@ -503,9 +558,22 @@ for citePageNum in citePageNums:
 
 		for tColI in range(len(pageColumns)):
 			pageColumns[tColI].organizeChildren()
+			print("----------------------------------")
+			print(f" Column {tColI}")
+			print("----------------------------------")
+			for child in pageColumns[tColI].getChildren():
+				print(child)
+		print("")
+		print("")
+		#If a line was split into multiple LTTextBoxHorizontals
+		#then this entire thing breaks, so lets do a check for that
+		#which includes sorting
+		for tColI in range(len(pageColumns)):
+			pageColumns[tColI].checkForBadLines()
 
 		#Split the page into blocks
 		for tCol in pageColumns:
+			heightThresh = int(tCol.getLineHeight())
 			tColLevels = set()
 			for chilI, chil in enumerate(tCol.getChildren()):
 				tColLevels.add(int(chil[1][0]))
@@ -517,20 +585,18 @@ for citePageNum in citePageNums:
 			pastLevel = 99
 			chilBlocks = []
 			curChilBlock = -1
-			print(tColLevels)
 			for chilI, chil in enumerate(tCol.getChildren()):
 				curChilHeight = int(chil[1][1])
 				lineHDiff = abs(curChilHeight - lastHeight)
 				curLevel = tColLevels.index(int(chil[1][0]))
-				print(curLevel)
-				if (curLevel < pastLevel) or (lineHDiff > heightThresh):
+				if (lineHDiff > 1) and ((curLevel < pastLevel) or (lineHDiff > heightThresh)):
 					chilBlocks.append([chil])
 					curChilBlock += 1
 				else:
 					chilBlocks[curChilBlock].append(chil)
 				pastLevel = curLevel
 				lastHeight = curChilHeight
-			#add the final blocks of text to a list
+			#Add blocks to the final citations list
 			for block in chilBlocks:
 				finalCites.append("".join([x[0] for x in block]))
 
@@ -572,7 +638,7 @@ except FileNotFoundError:
 print("Rules from replace_rules.txt")
 print("Pre-rules : ", preRepRules)
 print("Post-rules : ", postRepRules)
-print("")
+print("--------------------------")
 print("")
 citeFind = re.compile("([A-Za-z0-9.\- ]+)(?:[.+ ]+|&.+)\(?(\d{4}[ab]?)")
 for linkKey, linkObj in linksDict.items():
