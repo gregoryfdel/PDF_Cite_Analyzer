@@ -173,7 +173,7 @@ class textColumn:
 		self.organizeChildren()
 		return self.children
 
-	def getLineHeight(self,eps=5):
+	def getLineHeight(self,eps=1.5):
 		if len(self.children) == 0:
 			print("Please add children")
 			return -1
@@ -181,12 +181,14 @@ class textColumn:
 		for child in self.children:
 			lineHeights.append(abs(child[1][3] - child[1][1]))
 		avgHeight = sum(lineHeights)/len(lineHeights)
-		return avgHeight + eps
+		return avgHeight * eps
 
 	def _buildLine(self, curLine):
 		nBoxes = len(curLine) - 1
 		newBBox = [99999,99999,-99999,-99999]
 		newLineStr = ""
+		copyLine = curLine.copy()
+		curLine = sorted(copyLine, key=lambda x: x[1][0])
 		for boxI, box in enumerate(curLine):
 			addSpace = ""
 			if boxI != nBoxes:
@@ -558,15 +560,16 @@ for citePageNum in citePageNums:
 
 		for tColI in range(len(pageColumns)):
 			pageColumns[tColI].organizeChildren()
-			print("----------------------------------")
-			print(f" Column {tColI}")
-			print("----------------------------------")
-			for child in pageColumns[tColI].getChildren():
-				print(child)
-		print("")
-		print("")
+			#print("----------------------------------")
+			#print(f" Column {tColI}")
+			#print("----------------------------------")
+			#for child in pageColumns[tColI].getChildren():
+			#	print(child)
+		#print("")
+		#print("")
 		#If a line was split into multiple LTTextBoxHorizontals
 		#then this entire thing breaks, so lets do a check for that
+		# and merge any LTTextBoxHorizontals with the same y0
 		#which includes sorting
 		for tColI in range(len(pageColumns)):
 			pageColumns[tColI].checkForBadLines()
