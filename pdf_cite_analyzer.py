@@ -30,11 +30,18 @@ if adsToken == '':
 	try:
 		with open("ads_token.txt",'r') as fp:
 			for line in fp:
-				token = line.strip()
+				adsToken = line.strip()
+		print("Found Token with file : ",adsToken)
 	except:
 		pass
+else:
+	if adsToken != "":
+		print("Using token in script : ",adsToken)
 
-na.ADS.TOKEN = adsToken
+if adsToken != "":
+	na.ADS.TOKEN = adsToken
+else:
+	print("Warning! ADS Token is empty, ensure using an enviromental variable or create the 'ads_token.txt' file and place in there")
 # by default, the top 10 records are returned, sorted in
 # reverse chronological order. This can be changed
 
@@ -45,6 +52,19 @@ na.ADS.SORT = 'bibcode desc'
 # change the fields that are returned (enter as strings in a list)
 # We only need the title and bibcode
 na.ADS.ADS_FIELDS = ['title', 'bibcode']
+
+#If you want rate limit info, change to true with ads package installed
+if False:
+	import ads as adsPack
+	adsPack.config.token = na.ADS.TOKEN
+	r = adsPack.RateLimits('SearchQuery')
+	print("========================")
+	print("ADS Rate Limit Info")
+	limitInfo = r.get_info()
+	print("Current Query Limit : ",limitInfo["limit"])
+	print(f"Query Amount Remaining : ",limitInfo["remaining"])
+	print("========================")
+
 
 linksDict = {}
 pageObjIds = []
@@ -713,10 +733,22 @@ for linkKey, linkObj in linksDict.items():
 		if "family" in authorD.keys():
 			if authorD["family"] == "Collaboration":
 				continue
-			particleAuth = ""
+			authName = authorD['family']
+			authGiven = authorD['given']
+
+			authNameC = ""
+			authNameA = authName.split(" ")
+			for authNamePart in authNameA:
+				authNamePartNP = authNamePart.replace(".","")
+				if len(authNamePartNP) == 1:
+					authGiven = authNamePart + " " + authGiven
+					continue
+				authNameC += authNamePart
+			authName = authNameC
 			if "particle" in authorD.keys():
-				particleAuth = authorD["particle"] + " "
-			adsParts["author"] += f" author:\"{particleAuth}{authorD['family']}, {authorD['given']}\""
+				authName = authName["particle"] + " " + authName
+			#Author Names are complicated, it can either be First Last or Last, First; and we literally don't know
+			adsParts["author"] += f" author:(\"{authName}, {authGiven}\" OR \"{authGiven} {authName}\")"
 
 	if 'date' in citeParse.keys():
 		adsParts["year"] = f" year:{citeParse['date'][0]}"
@@ -735,7 +767,7 @@ for linkKey, linkObj in linksDict.items():
 
 	if "pages" in citeParse.keys():
 		orgPage = citeParse['pages'][0]
-		pageCharCheck = re.compile(f"[A-Z]?{orgPage}[A-Z]?")
+		pageCharCheck = re.compile(f"[A-Z]?{orgPage}[A-Z]?(?:\.?)")
 		pageNumP = pageCharCheck.findall(unparseStr)[0].strip()
 		adsParts["page"] = f" (page:{orgPage} OR page:{pageNumP})"
 
@@ -745,15 +777,22 @@ for linkKey, linkObj in linksDict.items():
 
 	if "arxiv" in citeParse.keys():
 		adsParts["arxiv"] = f" arxiv:{citeParse['arxiv'][0]}"
+
+	if "doi" in citeParse.keys():
+		adsParts["doi"] = f" doi:\"{citeParse['doi'][0]}\""
+
 	papers = []
 	try:
 		if "arxiv" in adsParts.keys():
 			adsSearchString = adsParts["arxiv"].strip()
+		elif "doi" in adsParts.keys():
+			adsSearchString = adsParts["doi"].strip()
 		else:
 			adsSearchString = "".join(list(adsParts.values()))
 		papers = na.ADS.query_simple(adsSearchString)
 		print(adsSearchString)
-	except:
+	except Exception as e:
+		print(e)
 		attempts = [["page"],["bibstem"],["volume"],["volume","page"],["volume","page","bibstem"]]
 		for attempt in attempts:
 			try:
@@ -766,7 +805,8 @@ for linkKey, linkObj in linksDict.items():
 				papers = na.ADS.query_simple(adsSearchString)
 				print(adsSearchString)
 				break
-			except:
+			except Exception as e:
+				print(e)
 				continue
 	if len(papers) > 1:
 		print("----------------------------------")
