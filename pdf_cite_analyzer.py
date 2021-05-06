@@ -772,7 +772,9 @@ for linkKey, linkObj in linksDict.items():
 					citePart = f"{oneLetterPart}{nonOneLetterPart}".strip()
 					failSafe = f" OR \"{citePart}\""
 					break
-			#Author Names are complicated, it can either be First Last or Last, First or Last First; we literally can't tell
+			#Author Names are complicated, how it was parsed and how we are putting it back together
+			#could yield wrong formats. To do it systemically, we attempt all formats and hope
+			#one is correct
 			adsParts["author"] += f" author:(\"{authName}, {authGiven}\" OR \"{authGiven} {authName}\"{failSafe})"
 
 	if 'date' in citeParse.keys():
@@ -876,15 +878,39 @@ new_pdf = pdfrw.PdfWriter()  # Create an empty pdf
 for pdfrwpage in pdfrwpdf.pages:  # Go through the pages
 	# Links are in Annots, but some pages don't have links so Annots returns None
 	for pdfrwannot in pdfrwpage.Annots or []:
-		old_url = pdfrwannot.A.D.replace("(","").replace(")","")
+		if (pdfrwannot.Subtype != "/Link") and (pdfrwannot.A.S != "/GoTo"):
+			# Skip over any annotations that are not goto links
+			continue
+		try:
+			old_url = pdfrwannot.A.D.replace("(","").replace(")","")
+		except AttributeError:
+			print("Unable to process annotation")
+			print(pdfrwannot)
+			continue
 		papLink = linksDict[old_url].getPaperLink()
 		if papLink == "":
 			continue
+		# GOTO Annotation Example:
+		#{'/Type': '/Annot', '/Subtype': '/Link', '/A': {'/D': '(cite.Fong21)',
+		# '/S': '/GoTo'}, '/Border': ['0', '0', '0'], '/C': ['0', '1', '0'],
+		# '/H': '/I', '/Rect': ['524.058', '109.413', '543.983', '119.408']}
+		#
+		# External Link Example:
+		#{'/Type': '/Annot', '/Subtype': '/Link', '/A': {'/Type': '/Action',
+		# '/S': '/URI', '/URI': '(https://casa.nrao.edu/)'},
+		#'/Border': ['0', '0', '0'], '/C': ['0', '1', '1'], '/H': '/I',
+		# '/Rect': ['311.701', '45.854', '381.432', '57.898']}
 		new_url = pdfrw.objects.pdfstring.PdfString("("+papLink+")")
 		new_type = pdfrw.objects.pdfstring.PdfString("/URI")
+		new_action = pdfrw.objects.pdfstring.PdfString("/Action")
 		# Override the URL with ours
+		pdfrwannot.A.D = None
+		pdfrwannot.A.Type = new_action
 		pdfrwannot.A.S = new_type
 		pdfrwannot.A.URI = new_url
+		pdfrwannot.C = ['0','1','1']
 	new_pdf.addpage(pdfrwpage)
 
 new_pdf.write(outputPDFDocName)
+
+print("Created pdf ", outputPDFDocName)
