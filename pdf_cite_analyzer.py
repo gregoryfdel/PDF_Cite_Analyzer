@@ -605,13 +605,19 @@ for citePageNum in citePageNums:
 		#If a line was split into multiple LTTextBoxHorizontals
 		#then this entire thing breaks, so lets do a check for that
 		# and merge any LTTextBoxHorizontals with the same y0
-		#which includes sorting
+		#This step also includes sorting by height, which makes
+		#parsing much easier
 		for tColI in range(len(pageColumns)):
 			pageColumns[tColI].checkForBadLines()
 
-		#Split the page into blocks
+		#Split each column of text on the page into blocks
+		#of text with each block representing a continuous string of
+		#information
 		for tCol in pageColumns:
 			heightThresh = int(tCol.getLineHeight())
+
+			#We need to know the various indentation levels
+			#of the column
 			tColLevels = set()
 			for chilI, chil in enumerate(tCol.getChildren()):
 				tColLevels.add(int(chil[1][0]))
@@ -627,6 +633,10 @@ for citePageNum in citePageNums:
 				curChilHeight = int(chil[1][1])
 				lineHDiff = abs(curChilHeight - lastHeight)
 				curLevel = tColLevels.index(int(chil[1][0]))
+				#If the height doesn't change, it is part of the block
+				#If the indentation level gets smaller, it is not part of the block
+				#If the height changes more than 1.5x the average line height
+				#it is not part of the block
 				if (lineHDiff > 1) and ((curLevel < pastLevel) or (lineHDiff > heightThresh)):
 					chilBlocks.append([chil])
 					curChilBlock += 1
@@ -650,6 +660,7 @@ with open("input.txt","w") as fp:
 	fp.write(";;;\n")
 	fp.write("\n".join(finalCites))
 
+#Use the anystyle.io CLI to parse the citations
 jsonStr = subprocess.run(["anystyle","--stdout","-f","json,txt","parse","input.txt"], stdout=subprocess.PIPE).stdout.decode("utf-8")
 jsonStrD, jsonStrIn = jsonStr.split(";;;")
 citeParsed = json.loads(jsonStrD)
@@ -673,6 +684,11 @@ try:
 except FileNotFoundError:
 	pass
 
+#Lets look at all the text scraped from
+#inline citations and turn one of them into a
+#author part and year part; then search all of
+#the unparsed citations to find that author and
+#year
 print("Rules from replace_rules.txt")
 print("Pre-rules : ", preRepRules)
 print("Post-rules : ", postRepRules)
@@ -706,6 +722,7 @@ for linkKey, linkObj in linksDict.items():
 		continue
 	citationDict = {}
 	for citeI, unProcessedCite in enumerate(inA):
+		#Ignore big blocks of text, probably not a citation
 		if len(unProcessedCite) > 500:
 			continue
 		if (authorPart in unProcessedCite) and (yearPart in unProcessedCite):
@@ -743,6 +760,8 @@ for linkKey, linkObj in linksDict.items():
 	if len(list(citeParse.keys())) == 0:
 		continue
 
+	#Now lets take the parsed parts of the citation and turn it
+	#into an ADS search query
 	adsParts = {"author":""}
 	for authorD in citeParse["author"]:
 		if ("family" in authorD.keys()) and ('given' in authorD.keys()):
@@ -755,6 +774,9 @@ for linkKey, linkObj in linksDict.items():
 			if "particle" in authorD.keys():
 				authName = authName["particle"] + " " + authName
 
+			# This is because the parser gets really confused with names
+			# like A. B. Testman so we need to move the one letter parts
+			# to the front of the other parts, preserving order
 			failSafe = ""
 			for citePart in unparseStr.split(","):
 				nameParts = f"{authName} {authGiven}".split(" ")
@@ -808,6 +830,8 @@ for linkKey, linkObj in linksDict.items():
 	papers = []
 	if "doi" in citeParse.keys():
 		#This requires messy handling because doi's contain /
+		#But with a doi, it identifies only one paper
+		#so we can ignore everything but the doi
 		doiSearch = f'doi:\"{citeParse["doi"][0]}\"'
 		doiSearchqp = urllib.parse.quote_plus(doiSearch)
 		request_fields = na.ADS._fields_to_url()
@@ -887,7 +911,11 @@ for pdfrwpage in pdfrwpdf.pages:  # Go through the pages
 			print("Unable to process annotation")
 			print(pdfrwannot)
 			continue
-		papLink = linksDict[old_url].getPaperLink()
+		papLink = ""
+		if old_url in linksDict.keys():
+			papLink = linksDict[old_url].getPaperLink()
+		else:
+			print("Error!", old_url," did not have an associated processed citation")
 		if papLink == "":
 			continue
 		# GOTO Annotation Example:
