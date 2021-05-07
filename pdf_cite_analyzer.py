@@ -24,6 +24,7 @@ from datetime import datetime
 import requests
 import urllib.parse
 
+from unidecode import unidecode # $ pip install Unidecode
 import tzlocal  # $ pip install tzlocal
 
 
@@ -201,7 +202,7 @@ class textColumn:
 		self.organizeChildren()
 		return self.children
 
-	def getLineHeight(self,eps=1.5):
+	def getLineHeight(self,eps=1.15):
 		if len(self.children) == 0:
 			print("Please add children")
 			return -1
@@ -315,7 +316,9 @@ class linkObj:
 		self.assocTextIn += 1
 
 	def getAllText(self):
-		return self.assocText
+		self.assocText = [x.replace("- ","") for x in self.assocText]
+		retText = [x for x in self.assocText if x != ""]
+		return retText
 
 	def getURI(self):
 		return self.gotoLoc
@@ -571,7 +574,7 @@ for citePageNum in citePageNums:
 		if getPageNumWithPageObj(page) != citePageNum:
 			continue
 		refPageText = []
-		print("On citation page, attempting to parse")
+		print("On a citation page, attempting to parse")
 		layout = device.get_result()
 		for element in layout:
 			if type(element) == LTTextBoxHorizontal:
@@ -595,13 +598,7 @@ for citePageNum in citePageNums:
 
 		for tColI in range(len(pageColumns)):
 			pageColumns[tColI].organizeChildren()
-			#print("----------------------------------")
-			#print(f" Column {tColI}")
-			#print("----------------------------------")
-			#for child in pageColumns[tColI].getChildren():
-			#	print(child)
-		#print("")
-		#print("")
+
 		#If a line was split into multiple LTTextBoxHorizontals
 		#then this entire thing breaks, so lets do a check for that
 		# and merge any LTTextBoxHorizontals with the same y0
@@ -613,41 +610,72 @@ for citePageNum in citePageNums:
 		#Split each column of text on the page into blocks
 		#of text with each block representing a continuous string of
 		#information
+		colN = 1
 		for tCol in pageColumns:
-			heightThresh = int(tCol.getLineHeight())
+			paraHeightThresh = int(tCol.getLineHeight(1.5))
 
-			#We need to know the various indentation levels
-			#of the column
-			tColLevels = set()
-			for chilI, chil in enumerate(tCol.getChildren()):
-				tColLevels.add(int(chil[1][0]))
-
-			tColLevels = list(tColLevels)
-			tColLevels.sort()
-
+			#First we need to split this column into paragraphs;
+			#So any large gap will create a break
 			lastHeight = 9999
-			pastLevel = 99
-			chilBlocks = []
-			curChilBlock = -1
+			paragraphs = []
+			curPara = []
+			curParagraphI = 0
+			#Only works because organized by y above
 			for chilI, chil in enumerate(tCol.getChildren()):
 				curChilHeight = int(chil[1][1])
 				lineHDiff = abs(curChilHeight - lastHeight)
-				curLevel = tColLevels.index(int(chil[1][0]))
-				#If the height doesn't change, it is part of the block
-				#If the indentation level gets smaller, it is not part of the block
-				#If the height changes more than 1.5x the average line height
-				#it is not part of the block
-				if (lineHDiff > 1) and ((curLevel < pastLevel) or (lineHDiff > heightThresh)):
-					chilBlocks.append([chil])
-					curChilBlock += 1
-				else:
-					chilBlocks[curChilBlock].append(chil)
-				pastLevel = curLevel
+				if (lineHDiff > paraHeightThresh) and (len(curPara) > 0):
+					paragraphs.append(curPara)
+					curPara = []
+					curParagraphI += 1
+				curPara.append(chil)
 				lastHeight = curChilHeight
-			#Add blocks to the final citations list
-			for block in chilBlocks:
-				finalCites.append("".join([x[0].replace("- ","") for x in block]))
+			paragraphs.append(curPara)
+			print(f"Column {colN} on page {citePageNum} has a paragraphs threshold height of {paraHeightThresh} and contains {len(paragraphs)} paragraphs")
+			colN += 1
+			heightThresh = int(tCol.getLineHeight())
+			for paragraph in paragraphs:
+				#We need to know the various indentation levels
+				#of the paragraph
+				tColLevels = set()
+				for chilI, chil in enumerate(paragraph):
+					tColLevels.add(int(chil[1][0]))
 
+				tColLevels = list(tColLevels)
+				tColLevels.sort()
+
+				lastHeight = 9999
+				pastLevel = 99
+				chilBlocks = []
+				curChilBlock = -1
+				for chilI, chil in enumerate(paragraph):
+					curChilHeight = int(chil[1][1])
+					lineHDiff = abs(curChilHeight - lastHeight)
+					curLevel = tColLevels.index(int(chil[1][0]))
+					#All the ways the line can be the same,
+					#needed because indentation is complicated in
+					#how it relates to citations
+					if (lineHDiff < heightThresh):
+						chilBlocks[curChilBlock].append(chil)
+					elif ((curLevel < pastLevel) and (curLevel == 0)):
+						chilBlocks.append([chil])
+						curChilBlock += 1
+					elif (pastLevel == 0) and (curLevel == 0):
+						chilBlocks.append([chil])
+						curChilBlock += 1
+					else:
+						try:
+							chilBlocks[curChilBlock].append(chil)
+						except IndexError:
+							#The paragraph starts indented
+							chilBlocks.append([chil])
+							curChilBlock += 1
+					pastLevel = curLevel
+					lastHeight = curChilHeight
+				#Add blocks to the final citations list
+				for block in chilBlocks:
+					finalCites.append(unidecode("".join([x[0].replace("- ","") for x in block])))
+finalCites = [x for x in finalCites if x != ""]
 finalCites.sort()
 
 print("")
@@ -655,7 +683,6 @@ print("--------------------------")
 print("List of extracted citations")
 print("\n".join(finalCites))
 print("--------------------------")
-
 with open("input.txt","w") as fp:
 	fp.write(";;;\n")
 	fp.write("\n".join(finalCites))
@@ -664,10 +691,9 @@ with open("input.txt","w") as fp:
 jsonStr = subprocess.run(["anystyle","--stdout","-f","json,txt","parse","input.txt"], stdout=subprocess.PIPE).stdout.decode("utf-8")
 jsonStrD, jsonStrIn = jsonStr.split(";;;")
 citeParsed = json.loads(jsonStrD)
-
 inA = jsonStrIn.split("\n")
 
-preRepRules = []
+preRepRules = [["and","&"]]
 postRepRules = []
 usingPost = False
 try:
@@ -694,10 +720,12 @@ print("Pre-rules : ", preRepRules)
 print("Post-rules : ", postRepRules)
 print("--------------------------")
 print("")
-citeFind = re.compile("([A-Za-z0-9.\- ]+)(?:[.+ ]+|&.+)\(?(\d{4}[ab]?)")
+grabbedCites = set()
+citeFind = re.compile("(['A-Za-z0-9.\- ,&]+)(?:[.+ ]+)\(?(\d{4}[ab]?)")
 for linkKey, linkObj in linksDict.items():
 	citeFindstr = set()
 	for textCont in linkObj.getAllText():
+		textCont = unidecode(textCont)
 		if len(preRepRules) > 0:
 			for rule in preRepRules:
 				textCont = textCont.replace(rule[0],rule[1])
@@ -720,17 +748,44 @@ for linkKey, linkObj in linksDict.items():
 			authorPart = citePart.strip()
 	if (yearPart == "") and (authorPart == ""):
 		continue
+	authors = [x.strip() for x in re.split("[,&]",authorPart)]
+	authors = [x for x in authors if x != ""]
 	citationDict = {}
+	corI = -1
 	for citeI, unProcessedCite in enumerate(inA):
-		#Ignore big blocks of text, probably not a citation
-		if len(unProcessedCite) > 500:
+		#ignore empty strings
+		if unProcessedCite == "":
 			continue
-		if (authorPart in unProcessedCite) and (yearPart in unProcessedCite):
+		unProcessedCite = unProcessedCite.strip()
+		#Each in-line citation only refers to one citation
+		if citeI in grabbedCites:
+			continue
+
+		#The inline text should not show up in the citation
+		hasInLine = False
+		for inlineText in linkObj.getAllText():
+			if inlineText.strip() in unProcessedCite:
+				hasInLine = True
+		if hasInLine:
+			continue
+
+		authBool = [(authorP in unProcessedCite) for authorP in authors]
+		if (sum(authBool) == len(authBool)) and (yearPart in unProcessedCite):
+			#Make sure one of the authors is the first author
+			lowestInd = 999999
+			for auth in authors:
+				lowInd = unProcessedCite.index(auth)
+				if lowInd < lowestInd:
+					lowestInd = lowInd
+			if lowestInd > 2:
+				continue
+			corI = citeI
 			unparseCite = inA[citeI]
 			citationDict = citeParsed[citeI]
+			break
 	if unparseCite == "":
 		print("Unable to connect text from document : ",linkObj.getAllText()," to a citation.")
-		print("Failed Author String : ",authorPart)
+		print("Failed Author(s) String : ",authors)
 		print("Failed Year String : ", yearPart)
 		print("Please edit replace_rules.txt to clean up the extracted text and make the author and year clear.")
 		while True:
@@ -740,11 +795,12 @@ for linkKey, linkObj in linksDict.items():
 			else:
 				break
 	else:
-		print("Connected the text from document : ",linkObj.getAllText()," to ", unparseCite)
+		print("Connected the text from document : ",linkObj.getAllText()," to ", unparseCite, " using ",authors," and ",yearPart)
 	linkObj.author = authorPart
 	linkObj.year = yearPart
 	linkObj.setPaperObj(citationDict)
 	linkObj.unparseCite = unparseCite
+	grabbedCites.add(corI)
 
 print("--------------------------------------------------")
 breakStop = 0
@@ -763,14 +819,22 @@ for linkKey, linkObj in linksDict.items():
 	#Now lets take the parsed parts of the citation and turn it
 	#into an ADS search query
 	adsParts = {"author":""}
+	#3 authors is enough to narrow it down quite a bit
+	maxAuthors = 3
+	authorCount = 1
 	for authorD in citeParse["author"]:
 		if ("family" in authorD.keys()) and ('given' in authorD.keys()):
 			if authorD["family"] == "Collaboration":
 				continue
+
 			authName = authorD['family']
 			authGiven = authorD['given']
 			authName = authName.replace(",","").strip()
 			authGiven = authGiven.replace(",","").strip()
+			if len(authName) == 1:
+				authName = authName + "."
+			if len(authGiven) == 1:
+				authGiven = authGiven + "."
 			if "particle" in authorD.keys():
 				authName = authName["particle"] + " " + authName
 
@@ -797,7 +861,10 @@ for linkKey, linkObj in linksDict.items():
 			#Author Names are complicated, how it was parsed and how we are putting it back together
 			#could yield wrong formats. To do it systemically, we attempt all formats and hope
 			#one is correct
-			adsParts["author"] += f" author:(\"{authName}, {authGiven}\" OR \"{authGiven} {authName}\"{failSafe})"
+			adsParts["author"] += f" author:(\"{authName} {authGiven}\" OR \"{authGiven} {authName}\"{failSafe})"
+			authorCount += 1
+			if authorCount > maxAuthors:
+				break
 
 	if 'date' in citeParse.keys():
 		adsParts["year"] = f" year:{citeParse['date'][0]}"
@@ -815,7 +882,8 @@ for linkKey, linkObj in linksDict.items():
 			adsParts["bibstem"] = f" bibstem:{testBibstem}"
 
 	if "pages" in citeParse.keys():
-		orgPage = citeParse['pages'][0].split()[-1]
+		orgPage = citeParse['pages'][0]
+		orgPage = re.findall("\d+",orgPage)[0]
 		pageCharCheck = re.compile(f"[A-Z]?{orgPage}[A-Z]?(?:\.?)")
 		pageNumP = pageCharCheck.findall(unparseStr)[0].strip()
 		adsParts["page"] = f" (page:{orgPage} OR page:{pageNumP})"

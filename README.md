@@ -6,6 +6,7 @@ Replaces the internal links in a paper pdf with NASA ADS links. Will require som
 * [pdfrw](https://github.com/pmaupin/pdfrw); [pypi](https://pypi.org/project/pdfrw/)
 * [astroquery](https://astroquery.readthedocs.io/en/latest/)
 * [tzlocal](https://github.com/regebro/tzlocal); [pypi](https://pypi.org/project/tzlocal/)
+* [Unidecode](https://pypi.org/project/Unidecode/)
 * [anystyle command line tool](https://anystyle.io/)
 
 ## Usage
@@ -20,4 +21,4 @@ There is a step which requires a file called `replace_rules.txt` to be in the to
 <input> -> <replace>
 <input 2> -> <replace 2>
  ```
- Before the `;;;` are replacements done before the regrex attempts to parse the inline citation whereas after the `;;;` are replacements done on each group the regrex finds. The specific regrex is `([A-Za-z0-9.\- ]+)(?:[.+ ]+|&.+)\(?(\d{4}[ab]?)` where group 1 is the first authors name and group 2 is the year.
+ Before the `;;;` are replacements done before the regrex attempts to parse the inline citation whereas after the `;;;` are replacements done on each group the regrex finds. The specific regrex is `([A-Za-z0-9.\- ,&]+)(?:[.+ ]+)\(?(\d{4}[ab]?)` where group 1 is the first authors name and group 2 is the year.
