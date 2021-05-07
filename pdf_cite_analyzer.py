@@ -309,7 +309,7 @@ class linkObj:
 		return False
 
 	def addAssocText(self,text):
-		self.assocText[self.assocTextIn] += text
+		self.assocText[self.assocTextIn] += unidecode(text)
 
 	def increaseText(self):
 		self.assocText.append("")
@@ -416,6 +416,43 @@ def isNone(test):
 		return 0
 	else:
 		return 1
+
+#Directly search ADS without using query_simple
+def ads_search(searchQ):
+	searchqp = urllib.parse.quote_plus(searchQ)
+	request_fields = na.ADS._fields_to_url()
+	request_sort = na.ADS._sort_to_url()
+	request_rows = na.ADS._rows_to_url(na.ADS.NROWS, na.ADS.NSTART)
+	requestURL = na.ADS.QUERY_SIMPLE_URL + "q=" + searchqp + request_fields + request_sort + request_rows
+	response = na.ADS._request(method='GET', url=requestURL, headers={'Authorization': 'Bearer ' + na.ADS._get_token()}, timeout=na.ADS.TIMEOUT)
+	return response
+
+# We want to narrow it down as much as possible; so try multiple queries if fail or more than 1
+def attempt_ads(adsParts):
+	attempts = [["author","year"],["author","year","volume"],["author","year","page"],["author","year","volume","page"],["page","year","volume","bibstem"]]
+	workingPapers = [[""]]*100
+	trueAdsSearchString = ""
+	for attempt in attempts:
+		try:
+			time.sleep(3)
+			attAdsParts = {}
+			for attK, attV in adsParts.items():
+				if attK in attempt:
+					attAdsParts[attK] = attV
+			adsSearchStringtemp = "".join(list(attAdsParts.values())).strip()
+			if adsSearchStringtemp == "":
+				continue
+			papers = na.ADS.query_simple(adsSearchStringtemp)
+			if len(papers) < len(workingPapers):
+				print("Results returned!")
+				workingPapers = papers.copy()
+				trueAdsSearchString = adsSearchStringtemp
+		except Exception as e:
+			print(e)
+			continue
+	if len(workingPapers) < 99:
+		return (workingPapers,trueAdsSearchString)
+	return (None,"".join(list(adsParts.values())).strip())
 
 parser = argparse.ArgumentParser(
 	description='This program replaces the citation links inside a pdf which just goes to the page with the ADS abstract link'
@@ -676,6 +713,32 @@ for citePageNum in citePageNums:
 				for block in chilBlocks:
 					finalCites.append(unidecode("".join([x[0].replace("- ","") for x in block])))
 finalCites = [x for x in finalCites if x != ""]
+
+cleanedCites = []
+#Some cleaning, if a line has an inline citation in it
+#then it is not itself a full citation
+allInLineText = []
+for linkKey, linkObj in linksDict.items():
+	for inlineText in linkObj.getAllText():
+		#Basic cleaning of the inline text, ensure a year is in it
+		if re.search("\d{4}[ab]?",inlineText):
+			inlineText = inlineText.strip()
+			allInLineText.append(inlineText)
+
+for citeLine in finalCites:
+	citeLine = citeLine.strip()
+	if citeLine == "":
+		continue
+	#Basic cleaning of the line text, ensure a year is in it
+	if re.search("\d{4}[ab]?",citeLine):
+		isClean = True
+		for inlineText in allInLineText:
+			if inlineText in citeLine:
+				isClean = False
+		if isClean:
+			cleanedCites.append(citeLine)
+
+finalCites = cleanedCites
 finalCites.sort()
 
 print("")
@@ -742,7 +805,7 @@ for linkKey, linkObj in linksDict.items():
 	authorPart = ""
 	unparseCite = ""
 	for citePart in citeFindstr:
-		if re.match("\d{4}[ab]?",citePart):
+		if re.search("\d{4}[ab]?",citePart):
 			yearPart = citePart.strip().replace("a","").replace("b","")
 		else:
 			authorPart = citePart.strip()
@@ -753,20 +816,9 @@ for linkKey, linkObj in linksDict.items():
 	citationDict = {}
 	corI = -1
 	for citeI, unProcessedCite in enumerate(inA):
-		#ignore empty strings
-		if unProcessedCite == "":
-			continue
 		unProcessedCite = unProcessedCite.strip()
 		#Each in-line citation only refers to one citation
 		if citeI in grabbedCites:
-			continue
-
-		#The inline text should not show up in the citation
-		hasInLine = False
-		for inlineText in linkObj.getAllText():
-			if inlineText.strip() in unProcessedCite:
-				hasInLine = True
-		if hasInLine:
 			continue
 
 		authBool = [(authorP in unProcessedCite) for authorP in authors]
@@ -857,6 +909,7 @@ for linkKey, linkObj in linksDict.items():
 							nonOneLetterPart += unParsePart + " "
 					citePart = f"{oneLetterPart}{nonOneLetterPart}".strip()
 					failSafe = f" OR \"{citePart}\""
+					failSafe = " ".join(failSafe.split())
 					break
 			#Author Names are complicated, how it was parsed and how we are putting it back together
 			#could yield wrong formats. To do it systemically, we attempt all formats and hope
@@ -870,7 +923,8 @@ for linkKey, linkObj in linksDict.items():
 		adsParts["year"] = f" year:{citeParse['date'][0]}"
 
 	if 'volume' in citeParse.keys():
-		adsParts["volume"] = f" volume:{citeParse['volume'][0].split(',')[0]}"
+		volNum = citeParse['volume'][0].split(',')[0].lstrip("0")
+		adsParts["volume"] = f" volume:{volNum}"
 
 	if 'container-title' in citeParse.keys():
 		testBibstem = citeParse['container-title'][0]
@@ -884,60 +938,64 @@ for linkKey, linkObj in linksDict.items():
 	if "pages" in citeParse.keys():
 		orgPage = citeParse['pages'][0]
 		orgPage = re.findall("\d+",orgPage)[0]
-		pageCharCheck = re.compile(f"[A-Z]?{orgPage}[A-Z]?(?:\.?)")
+		pageCharCheck = re.compile(f"[A-Za-z]?{orgPage}[A-Za-z]?(?:\.?)")
 		pageNumP = pageCharCheck.findall(unparseStr)[0].strip()
+		pageNumP = pageNumP.lstrip("0")
+		orgPage = orgPage.lstrip("0")
 		adsParts["page"] = f" (page:{orgPage} OR page:{pageNumP})"
 
+	#These requires messy handling because they may contain /
+	#But with a these, they identify only one paper
+	#so we can ignore everything but them
+	papers = []
 	if "url" in citeParse.keys():
-		citeUrl = citeParse['url'][0]
-		adsParts["arxiv"] = f" {citeUrl}"
+		urlSearch = f" {citeParse['url'][0]}"
+		response = ads_search(urlSearch)
+		try:
+			response.raise_for_status()
+			papers = na.ADS._parse_response(response.json())
+			print(urlSearch)
+		except:
+			pass
 
 	if "arxiv" in citeParse.keys():
-		adsParts["arxiv"] = f" arxiv:{citeParse['arxiv'][0]}"
+		arxivSearch = f" arxiv:{citeParse['arxiv'][0]}"
+		response = ads_search(arxivSearch)
+		try:
+			response.raise_for_status()
+			papers = na.ADS._parse_response(response.json())
+			print(arxivSearch)
+		except:
+			pass
 
-	papers = []
 	if "doi" in citeParse.keys():
-		#This requires messy handling because doi's contain /
-		#But with a doi, it identifies only one paper
-		#so we can ignore everything but the doi
 		doiSearch = f'doi:\"{citeParse["doi"][0]}\"'
-		doiSearchqp = urllib.parse.quote_plus(doiSearch)
-		request_fields = na.ADS._fields_to_url()
-		request_sort = na.ADS._sort_to_url()
-		request_rows = na.ADS._rows_to_url(na.ADS.NROWS, na.ADS.NSTART)
-		doiRequestURL = na.ADS.QUERY_SIMPLE_URL + "q=" + doiSearchqp + request_fields + request_sort + request_rows
-		response = na.ADS._request(method='GET', url=doiRequestURL, headers={'Authorization': 'Bearer ' + na.ADS._get_token()}, timeout=na.ADS.TIMEOUT)
+		response = ads_search(doiSearch)
 		try:
 			response.raise_for_status()
 			papers = na.ADS._parse_response(response.json())
 			print(doiSearch)
 		except:
 			pass
+
 	if len(papers) == 0:
+		doAttemptChain = True
 		try:
-			if "arxiv" in adsParts.keys():
-				adsSearchString = adsParts["arxiv"].strip()
-			else:
-				adsSearchString = "".join(list(adsParts.values())).strip()
+			adsSearchString = "".join(list(adsParts.values())).strip()
 			papers = na.ADS.query_simple(adsSearchString)
-			print(adsSearchString)
+			if len(papers) == 1:
+				doAttemptChain = False
+				print(adsSearchString)
 		except Exception as e:
 			print(e)
-			attempts = [["page"],["bibstem"],["volume"],["volume","page"],["volume","page","bibstem"]]
-			for attempt in attempts:
-				try:
-					time.sleep(3)
-					attAdsParts = {}
-					for attK, attV in adsParts.items():
-						if not attK in attempt:
-							attAdsParts[attK] = attV
-					adsSearchString = "".join(list(attAdsParts.values())).strip()
-					papers = na.ADS.query_simple(adsSearchString)
-					print(adsSearchString)
-					break
-				except Exception as e:
-					print(e)
-					continue
+
+		if doAttemptChain:
+			retPapers, adsQ = attempt_ads(adsParts)
+			if (retPapers is not None) and ((len(retPapers) < len(papers)) or (len(papers) == 0)):
+				papers = retPapers
+				adsSearchString = adsQ
+			print(adsSearchString)
+
 	if len(papers) > 1:
 		print("----------------------------------")
 		print("More than 1 paper!")
