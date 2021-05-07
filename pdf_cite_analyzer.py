@@ -172,23 +172,30 @@ class destTreeNode:
 #We will need to break up the page into columns
 #Before breaking it up into paragraphs
 class textColumn:
-	def __init__(self,firstElem,thres=15.0):
+	def __init__(self,firstElem,thres=10.0):
 		self.minX = firstElem[1][0]
+		self.minY = firstElem[1][1]
 		self.maxX = firstElem[1][2]
+		self.maxY = firstElem[1][3]
 		self.threshold = thres
 		self.children = [firstElem]
 		self.flag = 0
 
 	def inCol(self,testEle):
-		if (testEle[1][0] <= (self.maxX + self.threshold)) and (self.minX <= (testEle[1][2] - self.threshold)):
-			if testEle[1][0] < self.minX:
-				self.minX = testEle[1][0]
-			if testEle[1][2] > self.maxX:
-				self.maxX = testEle[1][2]
+		threshY = self.getLineHeight()
+		if (testEle[1][1] <= (self.maxY + threshY)) and ((self.minY - threshY) <= testEle[1][3]) and (testEle[1][0] <= (self.maxX + self.threshold)) and ((self.minX - self.threshold) <= testEle[1][2]):
 			return True
 		return False
 
 	def addChild(self,testEle):
+		if testEle[1][0] < self.minX:
+			self.minX = testEle[1][0]
+		if testEle[1][1] < self.minY:
+			self.minY = testEle[1][1]
+		if testEle[1][2] > self.maxX:
+			self.maxX = testEle[1][2]
+		if testEle[1][3] > self.maxY:
+			self.maxY = testEle[1][3]
 		self.children.append(testEle)
 		self.flag = 0
 
@@ -365,17 +372,30 @@ def arraySelector(array, question,itemPrint = lambda x: x,itemOutput= lambda x:x
 		except ValueError:
 			print("That's not an number!")
 
+
 #parses a LTTextBoxHorizontal into a list of lines of text
 def getText(element):
 	retLines = []
 	curLine = ""
 	for line in element._objs:
+		lineX0 = line.x0
+		lineX1 = line.x1
+		lastX = lineX0
+		charWidth = 999
 		for char in line._objs:
 			if type(char) == LTChar:
+				#If the parser broke and accidentally put two lines together which shouldn't be together
+				if ((char.x1 - lastX) > charWidth):
+					retLines.append((curLine,[lineX0,line.y0,char.x1,line.y1]))
+					lineX0 = char.x0
+					lineX1 = line.x1
+					curLine = ""
+				lastX = char.x1
+				charWidth = abs(char.x1 - char.x0) * 3.5
 				curLine += char.get_text()
 			else:
 				curLine += " "
-		retLines.append((curLine,[line.x0,line.y0,line.x1,line.y1]))
+		retLines.append((curLine,[lineX0,line.y0,lineX1,line.y1]))
 		curLine = ""
 	return retLines
 
@@ -417,6 +437,15 @@ def isNone(test):
 	else:
 		return 1
 
+#get the leaves of a tree no matter how deep
+def getbottomNodes(treeNode,botNodes):
+	if len(treeNode.kids) > 0:
+		for kid in treeNode.kids:
+			getbottomNodes(kid,botNodes)
+	else:
+		botNodes.append(treeNode)
+
+
 #Directly search ADS without using query_simple
 def ads_search(searchQ):
 	searchqp = urllib.parse.quote_plus(searchQ)
@@ -426,6 +455,7 @@ def ads_search(searchQ):
 	requestURL = na.ADS.QUERY_SIMPLE_URL + "q=" + searchqp + request_fields + request_sort + request_rows
 	response = na.ADS._request(method='GET', url=requestURL, headers={'Authorization': 'Bearer ' + na.ADS._get_token()}, timeout=na.ADS.TIMEOUT)
 	return response
+
 
 # We want to narrow it down as much as possible; so try multiple queries if fail or more than 1
 def attempt_ads(adsParts):
@@ -478,9 +508,13 @@ interpreter = PDFPageInterpreter(rsrcmgr, device)
 parser = PDFParser(document)
 doc = PDFDocument(parser)
 
+processedPages = []
 #Get links and thier positions, and put that info into custom objects
 for page in PDFPage.get_pages(document):
 	interpreter.process_page(page)
+	processedPages.append(page)
+
+for page in processedPages:
 	# receive the LTPage object for the page.
 	if page.annots:
 		for annotation in page.annots:
@@ -501,15 +535,13 @@ for page in PDFPage.get_pages(document):
 					linksDict[uri] = linkObj(annotation, uri, position, page.pageid )
 
 # get the pageid order in the document
-for page in PDFPage.get_pages(document):
-	interpreter.process_page(page)
+for page in processedPages:
 	pageObjIds.append(page.pageid)
 
 # now that we have all the links in the document
 # lets go back and figure out which text is inside them
 prevChar = None
-for page in PDFPage.get_pages(document):
-	interpreter.process_page(page)
+for page in processedPages:
 	# receive the LTPage object for the page.
 	layout = device.get_result()
 	for linkKey in linksDict.keys():
@@ -540,19 +572,22 @@ dests = dict_value(names["Dests"])
 destTree = destTreeNode(dests)
 destD = {}
 
-for x in destTree.kids:
-	for y in x.kids:
-		nA = list(y.selfRep["Names"])
-		curkey = ""
-		#At this level they are in a list of [<key> <value> <key 2> <value 2> ...]
-		for nI, nn in enumerate(nA):
-			if not (nI % 2):
-				curkey = nA[nI].decode("utf-8")
-			else:
-				try:
-					destD[curkey] = nA[nI].resolve()["D"]
-				except:
-					continue
+
+leafList = []
+getbottomNodes(destTree,leafList)
+
+for y in leafList:
+	nA = list(y.selfRep["Names"])
+	curkey = ""
+	#At this level they are in a list of [<key> <value> <key 2> <value 2> ...]
+	for nI, nn in enumerate(nA):
+		if not (nI % 2):
+			curkey = nA[nI].decode("utf-8")
+		else:
+			try:
+				destD[curkey] = nA[nI].resolve()["D"]
+			except:
+				continue
 
 testK = list(destD.keys())[0]
 
@@ -620,6 +655,8 @@ for citePageNum in citePageNums:
 					#Line number removal
 					#if prog.match(curLineText[0]) is None:
 					refPageText.append(curLineText)
+
+		refPageText = sorted(refPageText, key=lambda x: x[1][1], reverse=True)
 		#Split the page into columns
 		pageColumns = [textColumn(refPageText.pop())]
 
@@ -668,7 +705,7 @@ for citePageNum in citePageNums:
 				curPara.append(chil)
 				lastHeight = curChilHeight
 			paragraphs.append(curPara)
-			print(f"Column {colN} on page {citePageNum} has a paragraphs threshold height of {paraHeightThresh} and contains {len(paragraphs)} paragraphs")
+			print(f"Page {citePageNum}; Column {colN} has a height thresh of {paraHeightThresh}")
 			colN += 1
 			heightThresh = int(tCol.getLineHeight())
 			for paragraph in paragraphs:
@@ -711,7 +748,7 @@ for citePageNum in citePageNums:
 					lastHeight = curChilHeight
 				#Add blocks to the final citations list
 				for block in chilBlocks:
-					finalCites.append(unidecode("".join([x[0].replace("- ","") for x in block])))
+					finalCites.append(unidecode("".join([x[0].replace("- ","").replace("  "," ") for x in block])))
 finalCites = [x for x in finalCites if x != ""]
 
 cleanedCites = []
