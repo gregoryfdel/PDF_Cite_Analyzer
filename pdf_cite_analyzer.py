@@ -440,51 +440,6 @@ def findClosest(array, targetVal):
 	return min([(tV,abs(tV - targetVal)) for tV in array],key=lambda x: x[1])[0]
 
 
-# FROM https://stackoverflow.com/questions/55593506/merge-the-bounding-boxes-near-by-into-one
-#Distance definition  between text to be merge
-dist_limit = 40
-
-#Generate two text boxes a larger one that covers them
-def merge_boxes(box1, box2):
-	return [min(box1[0], box2[0]),
-		 min(box1[1], box2[1]),
-		 max(box1[2], box2[2]),
-		 max(box1[3], box2[3])]
-
-
-#Computer a Matrix similarity of distances of the text and object
-def calc_sim(text, obj):
-	# text: ymin, xmin, ymax, xmax
-	# obj: ymin, xmin, ymax, xmax
-	text_xmin, text_ymin, text_xmax, text_ymax = text
-	obj_xmin, obj_ymin, obj_xmax, obj_ymax = obj
-
-	x_dist = min(abs(text_xmin-obj_xmin), abs(text_xmin-obj_xmax), abs(text_xmax-obj_xmin), abs(text_xmax-obj_xmax))
-	y_dist = min(abs(text_ymin-obj_ymin), abs(text_ymin-obj_ymax), abs(text_ymax-obj_ymin), abs(text_ymax-obj_ymax))
-
-	dist = x_dist + y_dist
-	return dist
-
-#Principal algorithm for merge text
-def merge_algo(texts_boxes):
-	for i, text_box_1 in enumerate(texts_boxes):
-		for j, text_box_2 in enumerate(texts_boxes):
-			if j <= i:
-				continue
-			# Create a new box if a distances is less than disctance limit defined
-			if calc_sim(text_box_1, text_box_2) < dist_limit:
-				# Create a new box
-				new_box = merge_boxes(text_box_1, text_box_2)
-				texts_boxes[i] = new_box
-				#delete previous text boxes
-				del texts_boxes[j]
-				#return a new boxes and new text string that are close
-				return True, texts_boxes
-
-	return False, texts_boxes
-
-
-
 
 parser = argparse.ArgumentParser(
 	description='This program replaces the citation links inside a pdf which just goes to the page with the ADS abstract link'
