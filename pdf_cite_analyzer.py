@@ -26,6 +26,10 @@ import requests
 import urllib.parse
 from collections import OrderedDict
 
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+
 from unidecode import unidecode # $ pip install Unidecode
 import tzlocal  # $ pip install tzlocal
 
@@ -512,16 +516,70 @@ for page in PDFPage.get_pages(document):
 		if type(element) == LTTextBoxHorizontal:
 			curLineTextA = getText(element)
 			for curLineEE in curLineTextA:
+				curLineEE[0] = curLineEE[0].replace("'e","e").replace("'a","a")
 				allTextOnPage.append(curLineEE)
 
+	#From https://gist.github.com/lorenzob/f2d79320b4767f434c5c86c985b6de15
+	# simple (faster) true/false intersection check
+	def intersection(r1,r2):
+
+		X, Y, A, B = r1[0], r1[1], r1[2]-r1[0], r1[3]-r1[1]
+		X1, Y1, A1, B1 = r2[0], r2[1], r2[2]-r2[0], r2[3]-r2[1]
+		return not (A<X1 or A1<X or B<Y1 or B1<Y)
+
+	def is_close(bbox1, bbox2):
+		if intersection(bbox1, bbox1):
+				return True
+		# how far horizontally are the boxes
+		xdiff = abs(max(bbox1[0],bbox2[0]) - min(bbox1[2],bbox2[2]))
+		# how far vertically are the centroids of the boxes
+		mean_y1=(max_y1+min_y1) / 2.
+		mean_y2=(max_y2+min_y2) / 2.
+		ydiff = abs(mean_y1 - mean_y2)
+		if xdiff < 50 and ydiff < 15:
+			return True
+		return False
+
+	allTextOnPage = sorted(allTextOnPage,key=lambda x:x[1][0])
+	LENGTH = len(allTextOnPage)
+	status = np.zeros(LENGTH)
+	# compare each box to each other and, if they are close, assign them the same group number
+	# Each elements in status correspond to a box and the value is the group it belongs to
+	for i, cl1 in enumerate(allTextOnPage):
+		x = i
+		if i != LENGTH-1:
+			for j, cl2 in enumerate(allTextOnPage[i+1:]):
+				x = x+1
+				if is_close(cnt1[1],cnt2[1]):
+					status[x] = status[i]
+				else:
+					if status[x] == status[i]:
+						status[x] = i+1         # let's start a new group
+
+	for i, cl1 in enumerate(allTextOnPage):
+		cl1.append(status[i])
+
+	pageSize = page.mediabox
+	thresh_image = 255 * np.ones(shape=(pageSize[2], pageSize[3], 3), dtype=np.uint8)
 	curPageText = OrderedDict()
+
+
 	for currentLine in allTextOnPage:
-		currentLine[0] = currentLine[0].replace("'e","").replace("'a","")
+		currentLine[0] = currentLine[0].replace("'e","e").replace("'a","a")
 		#Line number removal
 		#if prog.match(currentLine[0]) is None:
+		xy0 = (math.floor(currentLine[1][0]), math.floor(currentLine[1][1]))
+		xy1 = (math.floor(currentLine[1][2]), math.floor(currentLine[1][3]))
+		thresh_image = cv2.rectangle(thresh_image, xy0, xy1, (0,0,0), -1)
 		LineY0 = math.floor((currentLine[1][1] // 10) * 10)
 		addToDict(curPageText,LineY0,currentLine)
 
+	# contourIm = cv2.cvtColor(thresh_image, cv2.COLOR_RGB2GRAY)
+	# contours, hierarchy = cv2.findContours(contourIm, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+	# cv2.drawContours(thresh_image, contours, -1, (0,255,0), 3)
+	plt.imshow(thresh_image)
+	plt.show()
+	sys.exit(0)
 	curPageText = OrderedDict(sorted(curPageText.items()))
 	#So the regular parser is really bad for this,
 	#Get rid of all the messiness and use our own
@@ -660,12 +718,11 @@ print("Citation Page Numbers : ",citePageNums)
 #prog = re.compile("^\s*\d{2,4}\s*$")
 
 finalCites = []
-
 #Now that we know where the citations are, lets parse that page
 for citePageNum in citePageNums:
 	print("Attempting to parse citations on page ",citePageNum)
 	#Get all the lines of text on that page
-	refPageText = [list(x.values()) for x in documentParsed[citePageNum].values()]
+	refPageText = list(documentParsed[citePageNum].values())
 	refPageText = [item for sublist in refPageText for item in sublist]
 	refPageText = sorted(refPageText, key=lambda x: x[1][1], reverse=True)
 	#Split the page into columns
