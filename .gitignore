@@ -4,3 +4,5 @@ input.txt
 ads_token.txt
 pdfs/**
 pdfs/
+.vscode/**
+.vscode

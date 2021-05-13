@@ -1,3 +1,4 @@
+import pdfminer
 from pdfminer.layout import LAParams
 from pdfminer.pdfinterp import PDFResourceManager
 from pdfminer.converter import PDFPageAggregator
@@ -6,7 +7,7 @@ from pdfminer.layout import LTTextBoxHorizontal
 from pdfminer.pdfinterp import PDFPageInterpreter
 from pdfminer.pdfdocument import PDFDocument
 from pdfminer.pdfparser import PDFParser
-from pdfminer.layout import LTChar
+from pdfminer.layout import LTChar, LTComponent, LTTextContainer, LTText
 from pdfminer.pdftypes import dict_value, PDFObjRef
 import pdfrw
 
@@ -23,6 +24,7 @@ import math
 from datetime import datetime
 import requests
 import urllib.parse
+from collections import OrderedDict
 
 from unidecode import unidecode # $ pip install Unidecode
 import tzlocal  # $ pip install tzlocal
@@ -62,7 +64,7 @@ else:
 na.ADS.ADS_FIELDS = ['title', 'bibcode']
 
 #How many more queries can we make today?
-getStarRes = na.ADS.query_simple("star",get_raw_response=True)
+getStarRes = na.ADS.query_simple("star",get_raw_response=True,cache=False)
 starHeadDict = getStarRes.headers
 
 resetTimestamp = float(starHeadDict["X-RateLimit-Reset"])
@@ -78,83 +80,6 @@ print("========================")
 linksDict = {}
 pageObjIds = []
 pageIds = []
-
-class Link(object):
-	__slots__ = 'prev', 'next', 'key', '__weakref__'
-
-#Used to clean up inline citations
-class OrderedSet(collections.MutableSet):
-	'Set the remembers the order elements were added'
-	# Big-O running times for all methods are the same as for regular sets.
-	# The internal self.__map dictionary maps keys to links in a doubly linked list.
-	# The circular doubly linked list starts and ends with a sentinel element.
-	# The sentinel element never gets deleted (this simplifies the algorithm).
-	# The prev/next links are weakref proxies (to prevent circular references).
-	# Individual links are kept alive by the hard reference in self.__map.
-	# Those hard references disappear when a key is deleted from an OrderedSet.
-
-	def __init__(self, iterable=None):
-		self.__root = root = Link()		 # sentinel node for doubly linked list
-		root.prev = root.next = root
-		self.__map = {}					 # key --> link
-		if iterable is not None:
-			self |= iterable
-
-	def __len__(self):
-		return len(self.__map)
-
-	def __contains__(self, key):
-		return key in self.__map
-
-	def add(self, key):
-		# Store new key in a new link at the end of the linked list
-		if key not in self.__map:
-			self.__map[key] = link = Link()
-			root = self.__root
-			last = root.prev
-			link.prev, link.next, link.key = last, root, key
-			last.next = root.prev = proxy(link)
-
-	def discard(self, key):
-		# Remove an existing item using self.__map to find the link which is
-		# then removed by updating the links in the predecessor and successors.
-		if key in self.__map:
-			link = self.__map.pop(key)
-			link.prev.next = link.next
-			link.next.prev = link.prev
-
-	def __iter__(self):
-		# Traverse the linked list in order.
-		root = self.__root
-		curr = root.next
-		while curr is not root:
-			yield curr.key
-			curr = curr.next
-
-	def __reversed__(self):
-		# Traverse the linked list in reverse order.
-		root = self.__root
-		curr = root.prev
-		while curr is not root:
-			yield curr.key
-			curr = curr.prev
-
-	def pop(self, last=True):
-		if not self:
-			raise KeyError('set is empty')
-		key = next(reversed(self)) if last else next(iter(self))
-		self.discard(key)
-		return key
-
-	def __repr__(self):
-		if not self:
-			return '%s()' % (self.__class__.__name__,)
-		return '%s(%r)' % (self.__class__.__name__, list(self))
-
-	def __eq__(self, other):
-		if isinstance(other, OrderedSet):
-			return len(self) == len(other) and list(self) == list(other)
-		return not self.isdisjoint(other)
 
 #Turn the pdf tree into something manipulatable by python
 class destTreeNode:
@@ -211,8 +136,7 @@ class textColumn:
 
 	def getLineHeight(self,eps=1.15):
 		if len(self.children) == 0:
-			print("Please add children")
-			return -1
+			return 0
 		lineHeights = []
 		for child in self.children:
 			lineHeights.append(abs(child[1][3] - child[1][1]))
@@ -262,20 +186,6 @@ class textColumn:
 		self.children = newChildList.copy()
 		self.organizeChildren(True)
 
-
-
-
-#Use element position syntax while
-#using the list position format
-#that the objects in this script use
-class posObj:
-	def __init__(self,pos):
-		self.posList = pos
-		self.x0 = pos[0]
-		self.y0 = pos[1]
-		self.x1 = pos[2]
-		self.y1 = pos[3]
-
 #The mega object which needs to
 #store data about itself due to the number of
 #steps needed between extracting the inline citations
@@ -283,13 +193,13 @@ class posObj:
 #parsing the citation, then searching ADS for
 #that citation; then finally replacing the
 #GOTO inline links with an ADS link
-class linkObj:
+class linkDocObj:
 	def __init__(self, annoObj, uri, pos, pageid):
 		self.origObjs = [annoObj]
 		self.gotoLoc = uri
 		self.assocText = [""]
 		self.assocTextIn = 0
-		self.positions = [[posObj(pos),pageid]]
+		self.positions = [[LTComponent(pos),pageid]]
 		self.destPage = None
 		self.unparseCite = ""
 		self.finalCiteStr = ""
@@ -302,7 +212,7 @@ class linkObj:
 		self.origObjs.append(obj)
 
 	def addPosition(self, pos, pageid):
-		self.positions.append([posObj(pos),pageid])
+		self.positions.append([LTComponent(pos),pageid])
 
 	def linkContains(self, element, pageid):
 		if not type(element) is LTChar:
@@ -310,8 +220,7 @@ class linkObj:
 		for testPos in self.positions:
 			if pageid != testPos[1]:
 				continue
-			testLoc = testPos[0]
-			if (element.x0 <= testLoc.x1) and (testLoc.x0 <= element.x1) and (element.y0 <= testLoc.y1) and (testLoc.y0 <= element.y1):
+			if testPos[0].is_hoverlap(element) and testPos[0].is_voverlap(element) :
 				return True
 		return False
 
@@ -348,6 +257,12 @@ class linkObj:
 	def getPaperLink(self):
 		return self.papLink
 
+	def __str__(self):
+		retStr = ""
+		for obss in self.origObjs:
+			retStr += f"{obss.resolve()} ;"
+		return retStr
+
 #Arbitrary element selector for a command-line interface
 def arraySelector(array, question,itemPrint = lambda x: x,itemOutput= lambda x:x,autoSelect = lambda x: False):
 	for item in array:
@@ -372,33 +287,63 @@ def arraySelector(array, question,itemPrint = lambda x: x,itemOutput= lambda x:x
 		except ValueError:
 			print("That's not an number!")
 
-
 #parses a LTTextBoxHorizontal into a list of lines of text
 def getText(element):
 	retLines = []
 	curLine = ""
 	for line in element._objs:
-		lineX0 = line.x0
-		lineX1 = line.x1
+		lineX0 = min(line.x0,line.x1)
+		lineX1 = max(line.x0,line.x1)
+		lineY0 = min(line.y0,line.y1)
+		lineY1 = max(line.y0,line.y1)
 		lastX = lineX0
-		charWidth = 999
+		charWidth = 0
+		charsum = 0
+		charnum = 0
+		charWidthBounds = 999
 		for char in line._objs:
 			if type(char) == LTChar:
+				charX0 = min(char.x0,char.x1)
+				charX1 = max(char.x0,char.x1)
+				charY0 = min(char.y0,char.y1)
+				charY1 = max(char.y0,char.y1)
 				#If the parser broke and accidentally put two lines together which shouldn't be together
-				if ((char.x1 - lastX) > charWidth):
-					retLines.append((curLine,[lineX0,line.y0,char.x1,line.y1]))
-					lineX0 = char.x0
-					lineX1 = line.x1
+				if ((charX1 - lastX) > charWidthBounds):
+					retLines.append([unidecode(curLine),[lineX0,lineY0,charX1,lineY1], charsum/charnum])
+					charsum = 0
+					charnum = 0
+					lineX0 = charX1
 					curLine = ""
-				lastX = char.x1
-				charWidth = abs(char.x1 - char.x0) * 3.5
+				lastX = charX1
+				charWidth = abs(charX1 - charX0)
+				charWidthBounds = charWidth * 5.5
+				charsum += charWidth
+				charnum +=  1
 				curLine += char.get_text()
 			else:
 				curLine += " "
-		retLines.append((curLine,[lineX0,line.y0,lineX1,line.y1]))
+		retLines.append([unidecode(curLine), [lineX0,lineY0,lineX1,lineY1], charsum/charnum])
 		curLine = ""
 	return retLines
 
+def stitchString(stringArr):
+	retStr = ""
+	for stringPart in stringArr:
+		for ss in stringPart.split():
+			revRetS = retStr[::-1].strip()
+			revSS = ss[::-1].strip()
+			if revRetS.find(revSS) > 0:
+				retStr = "".join(retStr.rsplit(ss,1)[0],ss) + " "
+			else:
+				retStr +=  " " + ss
+	return retStr
+
+
+def addToDict(dict,key,value):
+	if key in dict.keys():
+		dict[key].append(value)
+	else:
+		dict[key] = [value]
 
 #The "page" object has a pageid, which
 #we can use to figure out the page number (after processing the document)
@@ -484,6 +429,63 @@ def attempt_ads(adsParts):
 		return (workingPapers,trueAdsSearchString)
 	return (None,"".join(list(adsParts.values())).strip())
 
+def findNextClosest(array, targetVal):
+	array.sort()
+	for item in array:
+		if item > targetVal:
+			return item
+	return 0
+
+def findClosest(array, targetVal):
+	return min([(tV,abs(tV - targetVal)) for tV in array],key=lambda x: x[1])[0]
+
+
+# FROM https://stackoverflow.com/questions/55593506/merge-the-bounding-boxes-near-by-into-one
+#Distance definition  between text to be merge
+dist_limit = 40
+
+#Generate two text boxes a larger one that covers them
+def merge_boxes(box1, box2):
+	return [min(box1[0], box2[0]),
+		 min(box1[1], box2[1]),
+		 max(box1[2], box2[2]),
+		 max(box1[3], box2[3])]
+
+
+#Computer a Matrix similarity of distances of the text and object
+def calc_sim(text, obj):
+	# text: ymin, xmin, ymax, xmax
+	# obj: ymin, xmin, ymax, xmax
+	text_xmin, text_ymin, text_xmax, text_ymax = text
+	obj_xmin, obj_ymin, obj_xmax, obj_ymax = obj
+
+	x_dist = min(abs(text_xmin-obj_xmin), abs(text_xmin-obj_xmax), abs(text_xmax-obj_xmin), abs(text_xmax-obj_xmax))
+	y_dist = min(abs(text_ymin-obj_ymin), abs(text_ymin-obj_ymax), abs(text_ymax-obj_ymin), abs(text_ymax-obj_ymax))
+
+	dist = x_dist + y_dist
+	return dist
+
+#Principal algorithm for merge text
+def merge_algo(texts_boxes):
+	for i, text_box_1 in enumerate(texts_boxes):
+		for j, text_box_2 in enumerate(texts_boxes):
+			if j <= i:
+				continue
+			# Create a new box if a distances is less than disctance limit defined
+			if calc_sim(text_box_1, text_box_2) < dist_limit:
+				# Create a new box
+				new_box = merge_boxes(text_box_1, text_box_2)
+				texts_boxes[i] = new_box
+				#delete previous text boxes
+				del texts_boxes[j]
+				#return a new boxes and new text string that are close
+				return True, texts_boxes
+
+	return False, texts_boxes
+
+
+
+
 parser = argparse.ArgumentParser(
 	description='This program replaces the citation links inside a pdf which just goes to the page with the ADS abstract link'
 )
@@ -508,14 +510,17 @@ interpreter = PDFPageInterpreter(rsrcmgr, device)
 parser = PDFParser(document)
 doc = PDFDocument(parser)
 
-processedPages = []
 #Get links and thier positions, and put that info into custom objects
+curPage = 0
+documentParsed = {}
 for page in PDFPage.get_pages(document):
 	interpreter.process_page(page)
-	processedPages.append(page)
-
-for page in processedPages:
+	# get the pageid order in the document
+	pageObjIds.append(page.pageid)
+	curPage = getPageNumWithPageObj(page)
+	layout = device.get_result()
 	# receive the LTPage object for the page.
+	urisOnPage = set()
 	if page.annots:
 		for annotation in page.annots:
 			annotationDict = annotation.resolve()
@@ -523,45 +528,107 @@ for page in processedPages:
 				# Skip over any annotations that are not links
 				continue
 			position = annotationDict["Rect"]
-			uriDict = annotationDict["A"]
-			# This has always been true so far.
-			if uriDict["S"].name == "GoTo":
-				# Some of my URI's have spaces.
-				uri = uriDict["D"].decode("utf-8")
-				if uri in linksDict.keys():
-					linksDict[uri].addPosition(position, page.pageid)
-					linksDict[uri].addObj(annotation)
+			uri = ""
+			#Sometimes the annotation destinations are stored differently
+			if "A" in annotationDict.keys():
+				uriDict = annotationDict["A"]
+				# This has always been true so far.
+				if uriDict["S"].name == "GoTo":
+					# Some of my URI's have spaces.
+					uri = uriDict["D"].decode("utf-8")
+			if "Dest" in annotationDict.keys():
+				uri = annotationDict["Dest"].decode("utf-8")
+
+			if uri == "":
+				continue
+			else:
+				uri = uri.replace("(","").replace(")","").strip()
+			if uri in linksDict.keys():
+				linksDict[uri].addPosition(position, page.pageid)
+				linksDict[uri].addObj(annotation)
+			else:
+				linksDict[uri] = linkDocObj(annotation, uri, position, page.pageid)
+				urisOnPage.add(uri)
+	urisOnPage = list(urisOnPage)
+	urisOnPage.sort()
+	print(f"Extracting inline link text on page {curPage}")
+	allTextOnPage = []
+	for element in layout:
+		if type(element) == LTTextBoxHorizontal:
+			curLineTextA = getText(element)
+			for curLineEE in curLineTextA:
+				allTextOnPage.append(curLineEE)
+
+	curPageText = OrderedDict()
+	for currentLine in allTextOnPage:
+		currentLine[0] = currentLine[0].replace("'e","").replace("'a","")
+		#Line number removal
+		#if prog.match(currentLine[0]) is None:
+		LineY0 = math.floor((currentLine[1][1] // 10) * 10)
+		addToDict(curPageText,LineY0,currentLine)
+
+	curPageText = OrderedDict(sorted(curPageText.items()))
+	#So the regular parser is really bad for this,
+	#Get rid of all the messiness and use our own
+	#stuff
+	documentParsed[curPage] = curPageText
+	curPageKeys = list(curPageText.keys())
+	curPageKeys.sort()
+	for uri in urisOnPage:
+		possibleLines = []
+		foundInlineText = False
+		for posO, pageId in linksDict[uri].positions:
+			if pageId != page.pageid:
+				continue
+			boxY = min(math.floor(posO.y0),math.floor(posO.y1))
+			boxX = min(math.floor(posO.x0),math.floor(posO.x1))
+			boxUX = max(math.floor(posO.x0),math.floor(posO.x1))
+			smallKey = 9999999
+			for yb in curPageKeys:
+				if boxY % 10 != 0:
+					if yb > (boxY-10) and yb < smallKey:
+						smallKey = yb
 				else:
-					linksDict[uri] = linkObj(annotation, uri, position, page.pageid )
-
-# get the pageid order in the document
-for page in processedPages:
-	pageObjIds.append(page.pageid)
-
-# now that we have all the links in the document
-# lets go back and figure out which text is inside them
-prevChar = None
-for page in processedPages:
-	# receive the LTPage object for the page.
-	layout = device.get_result()
-	for linkKey in linksDict.keys():
-		for element in layout:
-			changedLinkObj = False
-			if type(element) == LTTextBoxHorizontal:
-				for line in element._objs:
-					for char in line._objs:
-						if linksDict[linkKey].linkContains(char, page.pageid):
-							newChar = char.get_text()
-							changedLinkObj = True
-							linksDict[linkKey].addAssocText(newChar)
-						elif linksDict[linkKey].linkContains(prevChar, page.pageid):
-							changedLinkObj = True
-							linksDict[linkKey].addAssocText(" ")
-						else:
-							pass
-						prevChar = char
-			if changedLinkObj:
-				linksDict[linkKey].increaseText()
+					if yb >= boxY and yb <= smallKey:
+						smallKey = yb
+			#print(boxY, " -> ", smallKey)
+			lineOs = curPageText[smallKey]
+			for lineP in lineOs:
+				lineX0 = math.floor(lineP[1][0])
+				lineX1 = math.floor(lineP[1][2])
+				charWidth = math.floor(lineP[2])
+				lineLen = len(lineP[0])
+				if (lineX0 <= (boxX+1)) and ((boxUX-1) <= lineX1):
+					#Now that we found the correct line, we must pull out the
+					#text, to do this we approximate the start and end of the
+					#substring, then find the next closest whitespace to those
+					#approximations
+					reSpaceF = re.finditer("\s+", lineP[0])
+					spaceIndes = [space.start() for space in reSpaceF]
+					spaceIndes.sort()
+					startInd = max((abs(boxX - lineX0) // charWidth),0)
+					endInd = min((abs(boxUX - lineX0) // charWidth) + 1,lineLen)
+					spaceIndes.insert(0, 0)
+					spaceIndes.append(lineLen)
+					closestStart = -999999
+					closestEnd = 999999
+					for ind in spaceIndes:
+						if ind >= endInd and ind < closestEnd:
+							closestEnd = ind
+						if ind <= startInd and ind > closestStart:
+							closestStart = ind
+					inlineTextB = lineP[0][closestStart:closestEnd]
+					if inlineTextB == "":
+						inlineTextB = lineP[0]
+					possibleLines.append(inlineTextB)
+					linksDict[uri].addAssocText(inlineTextB)
+					linksDict[uri].increaseText()
+					foundInlineText = True
+		if not foundInlineText:
+			print("Error! No inline text found for ",uri, " at ",posO, " please input the inline citation")
+			ansss = input(">")
+			linksDict[uri].addAssocText(inlineTextB)
+			linksDict[uri].increaseText()
 
 #The destinations of the links in the link object are
 #names which reference destinations in the document catalog
@@ -641,114 +708,96 @@ finalCites = []
 
 #Now that we know where the citations are, lets parse that page
 for citePageNum in citePageNums:
-	for page in PDFPage.get_pages(document):
-		interpreter.process_page(page)
-		if getPageNumWithPageObj(page) != citePageNum:
-			continue
-		refPageText = []
-		print("On a citation page, attempting to parse")
-		layout = device.get_result()
-		for element in layout:
-			if type(element) == LTTextBoxHorizontal:
-				curLineTextA = getText(element)
-				for curLineText in curLineTextA:
-					#Line number removal
-					#if prog.match(curLineText[0]) is None:
-					refPageText.append(curLineText)
+	print("Attempting to parse citations on page ",citePageNum)
+	#Get all the lines of text on that page
+	refPageText = [list(x.values()) for x in documentParsed[citePageNum].values()]
+	refPageText = [item for sublist in refPageText for item in sublist]
+	refPageText = sorted(refPageText, key=lambda x: x[1][1], reverse=True)
+	#Split the page into columns
+	pageColumns = [textColumn(refPageText.pop())]
 
-		refPageText = sorted(refPageText, key=lambda x: x[1][1], reverse=True)
-		#Split the page into columns
-		pageColumns = [textColumn(refPageText.pop())]
+	for part in refPageText:
+		addChildIn = -1
+		for testIn, col in enumerate(pageColumns):
+			if col.inCol(part):
+				addChildIn = testIn
+		if addChildIn > -1:
+			pageColumns[addChildIn].addChild(part)
+		else:
+			pageColumns.append(textColumn(part))
 
-		for part in refPageText:
-			addChildIn = -1
-			for testIn, col in enumerate(pageColumns):
-				if col.inCol(part):
-					addChildIn = testIn
-			if addChildIn > -1:
-				pageColumns[addChildIn].addChild(part)
-			else:
-				pageColumns.append(textColumn(part))
+	#If a line was split into multiple LTTextBoxHorizontals
+	#then this entire thing breaks, so lets do a check for that
+	# and merge any LTTextBoxHorizontals with the same y0
+	#This step also includes sorting by height, which makes
+	#parsing much easier
+	for tColI in range(len(pageColumns)):
+		pageColumns[tColI].checkForBadLines()
 
-		for tColI in range(len(pageColumns)):
-			pageColumns[tColI].organizeChildren()
+	#Split each column of text on the page into blocks
+	#of text with each block representing a continuous string of
+	#information
+	colN = 1
+	for tCol in pageColumns:
+		colLineH = int(tCol.getLineHeight(1.5))
+		print(f"Page {citePageNum}; Column {colN} has a height thresh of {colLineH}")
+		#First we need to split this column into paragraphs;
+		#So any large gap will create a break
+		lastHeight = 9999
+		curPara = []
+		paragraphs = []
+		#Only works because organized by y above
+		for chilI, chil in enumerate(tCol.getChildren()):
+			curChilHeight = int(chil[1][1])
+			lineHDiff = abs(curChilHeight - lastHeight)
+			if (lineHDiff > colLineH) and (len(curPara) > 0):
+				paragraphs.append(curPara)
+				curPara = []
+			curPara.append(chil)
+			lastHeight = colLineH
+		paragraphs.append(curPara)
+		colN += 1
+		for paragraph in paragraphs:
+			#We need to know the various indentation levels
+			#of the paragraph
+			tColLevels = set()
+			for chilI, chil in enumerate(paragraph):
+				tColLevels.add(int(chil[1][0]))
 
-		#If a line was split into multiple LTTextBoxHorizontals
-		#then this entire thing breaks, so lets do a check for that
-		# and merge any LTTextBoxHorizontals with the same y0
-		#This step also includes sorting by height, which makes
-		#parsing much easier
-		for tColI in range(len(pageColumns)):
-			pageColumns[tColI].checkForBadLines()
+			tColLevels = list(tColLevels)
+			tColLevels.sort()
 
-		#Split each column of text on the page into blocks
-		#of text with each block representing a continuous string of
-		#information
-		colN = 1
-		for tCol in pageColumns:
-			paraHeightThresh = int(tCol.getLineHeight(1.5))
-
-			#First we need to split this column into paragraphs;
-			#So any large gap will create a break
 			lastHeight = 9999
-			paragraphs = []
-			curPara = []
-			curParagraphI = 0
-			#Only works because organized by y above
-			for chilI, chil in enumerate(tCol.getChildren()):
+			pastLevel = 99
+			chilBlocks = []
+			curChilBlock = -1
+			for chilI, chil in enumerate(paragraph):
 				curChilHeight = int(chil[1][1])
 				lineHDiff = abs(curChilHeight - lastHeight)
-				if (lineHDiff > paraHeightThresh) and (len(curPara) > 0):
-					paragraphs.append(curPara)
-					curPara = []
-					curParagraphI += 1
-				curPara.append(chil)
-				lastHeight = curChilHeight
-			paragraphs.append(curPara)
-			print(f"Page {citePageNum}; Column {colN} has a height thresh of {paraHeightThresh}")
-			colN += 1
-			heightThresh = int(tCol.getLineHeight())
-			for paragraph in paragraphs:
-				#We need to know the various indentation levels
-				#of the paragraph
-				tColLevels = set()
-				for chilI, chil in enumerate(paragraph):
-					tColLevels.add(int(chil[1][0]))
-
-				tColLevels = list(tColLevels)
-				tColLevels.sort()
-
-				lastHeight = 9999
-				pastLevel = 99
-				chilBlocks = []
-				curChilBlock = -1
-				for chilI, chil in enumerate(paragraph):
-					curChilHeight = int(chil[1][1])
-					lineHDiff = abs(curChilHeight - lastHeight)
-					curLevel = tColLevels.index(int(chil[1][0]))
-					#All the ways the line can be the same,
-					#needed because indentation is complicated in
-					#how it relates to citations
-					if (lineHDiff < heightThresh):
+				curLevel = tColLevels.index(int(chil[1][0]))
+				#All the ways the line can be the same,
+				#needed because indentation is complicated in
+				#how it relates to citations
+				if (lineHDiff < colLineH):
+					chilBlocks[curChilBlock].append(chil)
+				elif ((curLevel < pastLevel) and (curLevel == 0)):
+					chilBlocks.append([chil])
+					curChilBlock += 1
+				elif (pastLevel == 0) and (curLevel == 0):
+					chilBlocks.append([chil])
+					curChilBlock += 1
+				else:
+					try:
 						chilBlocks[curChilBlock].append(chil)
-					elif ((curLevel < pastLevel) and (curLevel == 0)):
+					except IndexError:
+						#The paragraph starts indented
 						chilBlocks.append([chil])
 						curChilBlock += 1
-					elif (pastLevel == 0) and (curLevel == 0):
-						chilBlocks.append([chil])
-						curChilBlock += 1
-					else:
-						try:
-							chilBlocks[curChilBlock].append(chil)
-						except IndexError:
-							#The paragraph starts indented
-							chilBlocks.append([chil])
-							curChilBlock += 1
-					pastLevel = curLevel
-					lastHeight = curChilHeight
-				#Add blocks to the final citations list
-				for block in chilBlocks:
-					finalCites.append(unidecode("".join([x[0].replace("- ","").replace("  "," ") for x in block])))
+				pastLevel = curLevel
+				lastHeight = curChilHeight
+			#Add blocks to the final citations list
+			for block in chilBlocks:
+				finalCites.append(unidecode("".join([x[0].replace("- ","").replace("  "," ") for x in block])))
 finalCites = [x for x in finalCites if x != ""]
 
 cleanedCites = []
@@ -803,10 +852,14 @@ try:
 			if line == ";;;":
 				usingPost = True
 			else:
+				lineArr = line.split("->")
+				lineArr = [x.strip() for x in lineArr]
+				if len(lineArr) == 1:
+					lineArr = [lineArr[0],""]
 				if usingPost:
-					postRepRules.append(line.split(" -> "))
+					postRepRules.append(lineArr)
 				else:
-					preRepRules.append(line.split(" -> "))
+					preRepRules.append(lineArr)
 except FileNotFoundError:
 	pass
 
@@ -820,24 +873,30 @@ print("Pre-rules : ", preRepRules)
 print("Post-rules : ", postRepRules)
 print("--------------------------")
 print("")
+
+preRepRules = [x for x in preRepRules if x != [""]]
+postRepRules = [x for x in postRepRules if x != [""]]
+
 grabbedCites = set()
 citeFind = re.compile("(['A-Za-z0-9.\- ,&]+)(?:[.+ ]+)\(?(\d{4}[ab]?)")
 for linkKey, linkObj in linksDict.items():
+	print(linkKey)
+	print(linkObj.getAllText())
 	citeFindstr = set()
-	for textCont in linkObj.getAllText():
-		textCont = unidecode(textCont)
-		if len(preRepRules) > 0:
-			for rule in preRepRules:
-				textCont = textCont.replace(rule[0],rule[1])
-		for group in citeFind.findall(textCont):
-			for part in group:
-				part = part.replace("et al.","").strip()
-				part = " ".join(list(OrderedSet(part.split(" "))))
-				if len(postRepRules) > 0:
-					for rule in postRepRules:
-						part = part.replace(rule[0],rule[1])
-				part = part.strip()
-				citeFindstr.add(part)
+	textCont = stitchString(linkObj.getAllText())
+	textCont = unidecode(textCont)
+	if len(preRepRules) > 0:
+		for rule in preRepRules:
+			textCont = textCont.replace(rule[0],rule[1])
+	for group in citeFind.findall(textCont):
+		for part in group:
+			part = part.replace("et al.","").strip()
+			part = " ".join(list(part.split(" ")))
+			if len(postRepRules) > 0:
+				for rule in postRepRules:
+					part = part.replace(rule[0],rule[1])
+			part = part.strip()
+			citeFindstr.add(part)
 	yearPart = ""
 	authorPart = ""
 	unparseCite = ""
@@ -876,13 +935,12 @@ for linkKey, linkObj in linksDict.items():
 		print("Unable to connect text from document : ",linkObj.getAllText()," to a citation.")
 		print("Failed Author(s) String : ",authors)
 		print("Failed Year String : ", yearPart)
-		print("Please edit replace_rules.txt to clean up the extracted text and make the author and year clear.")
-		while True:
-			ans = input("Would you like to quit [y/n] >")
-			if ans == "y":
-				sys.exit(0)
-			else:
-				break
+		print("Please edit replace_rules.txt to clean up the extracted text")
+		ans = input("Manually input citation (if empty it will quit)>")
+		if ans == "":
+			sys.exit(0)
+		else:
+			unparseCite = ans
 	else:
 		print("Connected the text from document : ",linkObj.getAllText()," to ", unparseCite, " using ",authors," and ",yearPart)
 	linkObj.author = authorPart
@@ -897,7 +955,7 @@ for linkKey, linkObj in linksDict.items():
 	unparseStr = linkObj.unparseCite
 	citeParse = linkObj.papObj
 	if citeParse is None:
-		print(f"Error! {linkKey} has no citation!")
+		print(f"Error! {linkKey} has no citation! ",linkObj)
 		continue
 	adsSearchString = ""
 	print(unparseStr)
