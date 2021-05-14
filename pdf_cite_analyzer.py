@@ -361,11 +361,66 @@ def arraySelector(array, question,itemPrint = lambda x: x,itemOutput= lambda x:x
 		except ValueError:
 			print("That's not an number!")
 
+class textLine:
+	def __init__(self,newline):
+		self.x0 = newline.x0
+		self.y0 = newline.y0
+		self.x1 = newline.x1
+		self.y1 = newline.y1
+		self.bbox = [newline.x0, newline.y0, newline.x1, newline.y1]
+		self.text = ""
+		self.groupid = 0
+		self.pageid = 0
+	
+	def changeBBox(self,newBBox):
+		self.bbox = newBBox
+		self.x0 = newBBox[0]
+		self.y0 = newBBox[1]
+		self.x1 = newBBox[2]
+		self.y1 = newBBox[3]
+	
+	def setText(self,newString):
+		self.text = unidecode(newString)
+	
+	def getText(self):
+		return self.text
+	
+	def setGroupID(self,gip):
+		self.groupid = gip
+
+	def getGroupID(self):
+		return self.groupid
+	
+	def getBBox(self):
+		return self.bbox
+	
+	def merge(self, _obj):
+		BBox1 = _obj.getBBox()
+		BBox2 = self.getBBox()
+		newBBox = [0,0,0,0]
+		newBBox[0] = min(BBox1[0],BBox2[0])
+		newBBox[1] = min(BBox1[1],BBox2[1])
+		newBBox[2] = max(BBox1[2],BBox2[2])
+		newBBox[3] = max(BBox1[3],BBox2[3])
+		self.changeBBox(newBBox)
+		self.setText(self.getText() + _obj.getText())
+	
+	def getHeight(self):
+		return self.y1 - self.y0
+
+	def getWidth(self):
+		return self.x1 - self.x0
+
+	def buildRect(self, fillColor):
+		xy0 = (self.x0, self.y0)
+		return patches.Rectangle(xy0, self.getWidth(), self.getHeight(), facecolor=fillColor)
+
 #parses a LTTextBoxHorizontal into a list of lines of text
 def getText(element):
 	retLines = []
 	curLine = ""
 	for line in element._objs:
+		newLineObj = textLine(line)
 		lineX0 = min(line.x0,line.x1)
 		lineX1 = max(line.x0,line.x1)
 		lineY0 = min(line.y0,line.y1)
@@ -383,7 +438,10 @@ def getText(element):
 				charY1 = max(char.y0,char.y1)
 				#If the parser broke and accidentally put two lines together which shouldn't be together
 				if ((charX1 - lastX) > charWidthBounds):
-					retLines.append([unidecode(curLine),[lineX0,lineY0,charX1,lineY1], charsum/charnum])
+					newLineObj.setText(curLine)
+					newLineObj.changeBBox([lineX0,lineY0,charX1,lineY1])
+					retLines.append(newLineObj)
+					newLineObj = textLine(line)
 					charsum = 0
 					charnum = 0
 					lineX0 = charX1
@@ -396,7 +454,9 @@ def getText(element):
 				curLine += char.get_text()
 			else:
 				curLine += " "
-		retLines.append([unidecode(curLine), [lineX0,lineY0,lineX1,lineY1], charsum/charnum])
+		newLineObj.setText(curLine)
+		newLineObj.changeBBox([lineX0,lineY0,charX1,lineY1])
+		retLines.append(newLineObj)
 		curLine = ""
 	return retLines
 
@@ -559,6 +619,19 @@ def pick_word(wordTest, wordIndes):
 				return wordI[0]
 	return wordTest
 
+def mergeLinesInList(lineObjArr):
+	turnIntoOne = []
+	for posI, pos1 in enumerate(lineObjArr):
+		for posJ, pos2 in enumerate(lineObjArr):
+			if posI == posJ:
+				continue
+			if on_same_line(pos1.getBBox(), pos2.getBBox(),inXdiff=20,inYdiff=10):
+				posMinI = min(posI,posJ)
+				posMaxI = max(posI,posJ)
+				if not (posMinI,posMaxI) in turnIntoOne:
+					turnIntoOne.append((posMinI,posMaxI))
+	return turnIntoOne
+
 parser = argparse.ArgumentParser(
 	description='This program replaces the citation links inside a pdf which just goes to the page with the ADS abstract link'
 )
@@ -628,16 +701,7 @@ for page in PDFPage.get_pages(document):
 	#If two link boxes are close enough together and point
 	#to the same location, merge them
 	for uri in urisOnPage:
-		turnIntoOne = []
-		for posI, pos1 in enumerate(linksDict[uri].positions):
-			for posJ, pos2 in enumerate(linksDict[uri].positions):
-				if posI == posJ:
-					continue
-				if on_same_line(pos1.getBBox(), pos2.getBBox(),inXdiff=20,inYdiff=10):
-					posMinI = min(posI,posJ)
-					posMaxI = max(posI,posJ)
-					if not (posMinI,posMaxI) in turnIntoOne:
-						turnIntoOne.append((posMinI,posMaxI))
+		turnIntoOne = mergeLinesInList(linksDict[uri].positions)
 
 		posToRemove = []
 		for mergeI, mergeJ in turnIntoOne:
@@ -653,15 +717,23 @@ for page in PDFPage.get_pages(document):
 		if type(element) == LTTextBoxHorizontal:
 			curLineTextA = getText(element)
 			for curLineEE in curLineTextA:
-				curLineEE[0] = curLineEE[0].replace("'e","e").replace("'a","a")
+				curLineEE.text = curLineEE.text.replace("'e","e").replace("'a","a")
 				allTextOnPage.append(curLineEE)
+	
+	#Merge any lines close together
+	turnIntoOne = mergeLinesInList(allTextOnPage)
+	mergedLinesList = []
+	for l1I, l2I in turnIntoOne:
+		allTextOnPage[l1I].merge(allTextOnPage[l2I])
+		mergedLinesList.append(allTextOnPage[l1I])
+	
+	allTextOnPage = mergedLinesList
 
 	#Now we do the task of breaking up the page
 	#into columns and paragraphs
 	#This should not be sorted after this
-	allTextOnPage = sorted(allTextOnPage,key=lambda x:x[1][1])
+	allTextOnPage = sorted(allTextOnPage,key=lambda x:x.y0)
 	LENGTH = len(allTextOnPage)
-	status = np.zeros(LENGTH,dtype=np.uint8)
 	# compare each box to each other and, if they are close, assign them the same group number
 	# Each elements in status correspond to a box and the value is the group it belongs to
 	curStatus = 0
@@ -672,42 +744,37 @@ for page in PDFPage.get_pages(document):
 		#in a group, then make a new group with only it in it
 		if i not in inGroup:
 			curStatus += 1
-			status[i] = curStatus
+			cl1.setGroupID(curStatus)
 			inGroup.add(i)
 		for j, cl2 in enumerate(allTextOnPage):
 			if (i == j) or (j in inGroup):
 				continue
 			#Put all of it's neighbors into it's group
-			if is_close(cl1[1],cl2[1]):
-				status[j] = status[i]
+			if is_close(cl1.getBBox(),cl2.getBBox()):
+				cl2.setGroupID(cl1.getGroupID())
 				inGroup.add(j)
 	
-	#Organize lines by group
-	#Use index's because we can 
-	#be a lot less safe with list manipulation
+	#Organize lines by groups
 	lineStatusDict = {}
-	for i, cl1 in enumerate(allTextOnPage):
-		cl1.append(status[i])
-		addToDict(lineStatusDict,status[i],i)
+	for cl1 in allTextOnPage:
+		addToDict(lineStatusDict,cl1.getGroupID(),cl1)
 	
 	#Check if any groups encompass any other group
 	statusBBoxDict = {}
 	transformations = []
 	for statusG, statusArr in lineStatusDict.items():
-		statusBBox = [allTextOnPage[x][1] for x in statusArr]
-		statusX0 = min([x[0] for x in statusBBox])
-		statusY0 = min([x[1] for x in statusBBox])
-		statusX1 = max([x[2] for x in statusBBox])
-		statusY1 = max([x[3] for x in statusBBox])
+		statusX0 = min([x.x0 for x in statusArr])
+		statusY0 = min([x.y0 for x in statusArr])
+		statusX1 = max([x.x1 for x in statusArr])
+		statusY1 = max([x.y1 for x in statusArr])
 		statusBBoxDict[statusG] = (statusX0,statusY0,statusX1,statusY1)
 		for statusH, statusChildArr in lineStatusDict.items():
 			if statusG == statusH:
 				continue
-			statusChildBBox = [allTextOnPage[x][1] for x in statusChildArr]
-			statusChildX0 = min([x[0] for x in statusChildBBox])
-			statusChildY0 = min([x[1] for x in statusChildBBox])
-			statusChildX1 = max([x[2] for x in statusChildBBox])
-			statusChildY1 = max([x[3] for x in statusChildBBox])
+			statusChildX0 = min([x.x0 for x in statusChildArr])
+			statusChildY0 = min([x.y0 for x in statusChildArr])
+			statusChildX1 = max([x.x1 for x in statusChildArr])
+			statusChildY1 = max([x.y1 for x in statusChildArr])
 			if ((statusX0-10) < statusChildX0) and ((statusX1+10) > statusChildX1) and ((statusY0-10) < statusChildY0) and ((statusY1+10) > statusChildY1):
 				#Child inside parent; all should be given to parent
 				transformations.append((statusG,statusH))
@@ -717,8 +784,8 @@ for page in PDFPage.get_pages(document):
 	#Apply what we just learned
 	for parStat, chilStat in transformations:
 		for x in lineStatusDict[chilStat]:
-			allTextOnPage[x][-1] = parStat
-		lineStatusDict[parStat].extend(lineStatusDict[chilStat].copy())
+			x.setGroupID(parStat)
+		lineStatusDict[parStat].extend(lineStatusDict[chilStat])
 		del lineStatusDict[chilStat]
 		del statusBBoxDict[chilStat]
 
@@ -726,24 +793,22 @@ for page in PDFPage.get_pages(document):
 	allStatuses = list(set(lineStatusDict.keys()))
 	allStatuses.sort()
 
+
+	normM = mpl.colors.Normalize(vmin=0,vmax=len(allStatuses))
+	groupColors = {}
+	for groupID in allStatuses:
+		#assign a color based on group
+		color = cm.jet(normM(allStatuses.index(groupID)))
+		groupColors[groupID] = color
+
 	#Plot each text block with the group's color
 	pageSize = page.mediabox
 	fig,ax = plt.subplots(1)
 	plt.xlim(pageSize[0],pageSize[2])
 	plt.ylim(pageSize[1],pageSize[3])
 
-	normM = mpl.colors.Normalize(vmin=0,vmax=len(allStatuses))
-
-	groupColors = {}
 	for currentLine in allTextOnPage:
-		xy0 = (currentLine[1][0], currentLine[1][1])
-		xy1 = (currentLine[1][2], currentLine[1][3])
-		ww = xy1[0] - xy0[0]
-		hh = xy1[1] - xy0[1]
-		#assign a color based on group
-		color = cm.jet(normM(allStatuses.index(currentLine[-1])))
-		groupColors[currentLine[-1]] = color
-		ax.add_patch(patches.Rectangle(xy0, ww, hh, facecolor=color))
+		ax.add_patch(currentLine.buildRect(groupColors[currentLine.getGroupID()]))
 	
 	#Show the bounding boxes of each group
 	for statusX0,statusY0,statusX1,statusY1 in statusBBoxDict.values():
