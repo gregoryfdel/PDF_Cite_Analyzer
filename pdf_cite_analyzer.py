@@ -29,6 +29,8 @@ from collections import OrderedDict
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib as mpl
+import matplotlib.cm as cm
 
 from unidecode import unidecode # $ pip install Unidecode
 import tzlocal  # $ pip install tzlocal
@@ -197,13 +199,38 @@ class textColumn:
 #parsing the citation, then searching ADS for
 #that citation; then finally replacing the
 #GOTO inline links with an ADS link
+class linkPosition:
+	def __init__(self,_pos,_pageid):
+		self.bbox = _pos
+		self.posObj = LTComponent(_pos)
+		self.pageid = _pageid
+		self.groupid = 0
+
+	def setPageId(self,_pageid):
+		self.pageid = _pageid
+
+	def setGroupId(self,_groupid):
+		self.groupid = _groupid
+
+	def getBBox(self):
+		return self.bbox
+
+	def getBBoxObj(self):
+		return self.posObj
+
+	def getGroupId(self):
+		return self.groupid
+
+	def getPageId(self):
+		return self.groupid
+
 class linkDocObj:
 	def __init__(self, annoObj, uri, pos, pageid):
 		self.origObjs = [annoObj]
 		self.gotoLoc = uri
 		self.assocText = [""]
 		self.assocTextIn = 0
-		self.positions = [[LTComponent(pos),pageid]]
+		self.positions = [linkPosition(pos,pageid)]
 		self.destPage = None
 		self.unparseCite = ""
 		self.finalCiteStr = ""
@@ -216,15 +243,15 @@ class linkDocObj:
 		self.origObjs.append(obj)
 
 	def addPosition(self, pos, pageid):
-		self.positions.append([LTComponent(pos),pageid])
+		self.positions.append(linkPosition(pos,pageid))
 
 	def linkContains(self, element, pageid):
 		if not type(element) is LTChar:
 			return False
 		for testPos in self.positions:
-			if pageid != testPos[1]:
+			if pageid != testPos.getPageId():
 				continue
-			if testPos[0].is_hoverlap(element) and testPos[0].is_voverlap(element) :
+			if testPos.getBBoxObj().is_hoverlap(element) and testPos.getBBoxObj().is_voverlap(element) :
 				return True
 		return False
 
@@ -443,7 +470,27 @@ def findNextClosest(array, targetVal):
 def findClosest(array, targetVal):
 	return min([(tV,abs(tV - targetVal)) for tV in array],key=lambda x: x[1])[0]
 
+#Inspired by https://gist.github.com/lorenzob/f2d79320b4767f434c5c86c985b6de15
+# simple (faster) true/false intersection check
+def intersection(r1,r2):
+	X, Y, A, B = r1[0], r1[1], r1[2]-r1[0], r1[3]-r1[1]
+	X1, Y1, A1, B1 = r2[0], r2[1], r2[2]-r2[0], r2[3]-r2[1]
+	return not (A<X1 or A1<X or B<Y1 or B1<Y)
 
+def is_close(bbox1, bbox2):
+	if intersection(bbox1, bbox2):
+			return True
+	# How far does one need to slide the box
+	# horizontally in order for them to line up
+	# on either side
+	xdiff = min(abs(bbox1[0] - bbox2[0]),abs(bbox1[2] - bbox2[2]))
+	# how far vertically are the centroids of the boxes
+	mean_y1=(bbox1[3]+bbox1[1]) / 2.
+	mean_y2=(bbox2[3]+bbox2[1]) / 2.
+	ydiff = abs(mean_y1 - mean_y2)
+	if xdiff < 20 and ydiff < 30:
+		return True
+	return False
 
 parser = argparse.ArgumentParser(
 	description='This program replaces the citation links inside a pdf which just goes to the page with the ADS abstract link'
@@ -519,129 +566,193 @@ for page in PDFPage.get_pages(document):
 				curLineEE[0] = curLineEE[0].replace("'e","e").replace("'a","a")
 				allTextOnPage.append(curLineEE)
 
-	#From https://gist.github.com/lorenzob/f2d79320b4767f434c5c86c985b6de15
-	# simple (faster) true/false intersection check
-	def intersection(r1,r2):
-
-		X, Y, A, B = r1[0], r1[1], r1[2]-r1[0], r1[3]-r1[1]
-		X1, Y1, A1, B1 = r2[0], r2[1], r2[2]-r2[0], r2[3]-r2[1]
-		return not (A<X1 or A1<X or B<Y1 or B1<Y)
-
-	def is_close(bbox1, bbox2):
-		if intersection(bbox1, bbox1):
-				return True
-		# how far horizontally are the boxes
-		xdiff = abs(max(bbox1[0],bbox2[0]) - min(bbox1[2],bbox2[2]))
-		# how far vertically are the centroids of the boxes
-		mean_y1=(max_y1+min_y1) / 2.
-		mean_y2=(max_y2+min_y2) / 2.
-		ydiff = abs(mean_y1 - mean_y2)
-		if xdiff < 50 and ydiff < 15:
-			return True
-		return False
-
-	allTextOnPage = sorted(allTextOnPage,key=lambda x:x[1][0])
+	#Now we do the task of breaking up the page
+	#into columns and paragraphs
+	#NEVER SORT AFTER THIS!!!!
+	allTextOnPage = sorted(allTextOnPage,key=lambda x:x[1][1])
 	LENGTH = len(allTextOnPage)
-	status = np.zeros(LENGTH)
+	status = np.zeros(LENGTH,dtype=np.uint8)
 	# compare each box to each other and, if they are close, assign them the same group number
 	# Each elements in status correspond to a box and the value is the group it belongs to
+	curStatus = 0
+	#We don't want to double count, as it could mess things up
+	inGroup = set()
 	for i, cl1 in enumerate(allTextOnPage):
-		x = i
-		if i != LENGTH-1:
-			for j, cl2 in enumerate(allTextOnPage[i+1:]):
-				x = x+1
-				if is_close(cnt1[1],cnt2[1]):
-					status[x] = status[i]
-				else:
-					if status[x] == status[i]:
-						status[x] = i+1         # let's start a new group
-
+		#if we are looking at an element not
+		#in a group, then make a new group with only it in it
+		if i not in inGroup:
+			curStatus += 1
+			status[i] = curStatus
+			inGroup.add(i)
+		for j, cl2 in enumerate(allTextOnPage):
+			if (i == j) or (j in inGroup):
+				continue
+			#Put all of it's neighbors into it's group
+			if is_close(cl1[1],cl2[1]):
+				status[j] = status[i]
+				inGroup.add(j)
+	
+	#Organize lines by group
+	#Use index's because we can 
+	#be a lot less safe with list manipulation
+	lineStatusDict = {}
 	for i, cl1 in enumerate(allTextOnPage):
 		cl1.append(status[i])
+		addToDict(lineStatusDict,status[i],i)
+	
+	#Check if any groups encompass any other group
+	statusBBoxDict = {}
+	transformations = []
+	for statusG, statusArr in lineStatusDict.items():
+		statusBBox = [allTextOnPage[x][1] for x in statusArr]
+		statusX0 = min([x[0] for x in statusBBox])
+		statusY0 = min([x[1] for x in statusBBox])
+		statusX1 = max([x[2] for x in statusBBox])
+		statusY1 = max([x[3] for x in statusBBox])
+		statusBBoxDict[statusG] = (statusX0,statusY0,statusX1,statusY1)
+		for statusH, statusChildArr in lineStatusDict.items():
+			if statusG == statusH:
+				continue
+			statusChildBBox = [allTextOnPage[x][1] for x in statusChildArr]
+			statusChildX0 = min([x[0] for x in statusChildBBox])
+			statusChildY0 = min([x[1] for x in statusChildBBox])
+			statusChildX1 = max([x[2] for x in statusChildBBox])
+			statusChildY1 = max([x[3] for x in statusChildBBox])
+			if (statusX0 < statusChildX0) and (statusX1 > statusChildX1) and (statusY0 < statusChildY0) and (statusY1 > statusChildY1):
+				#Child inside parent; all should be given to parent
+				transformations.append((statusG,statusH))
 
+	#Apply what we just learned
+	for parStat, chilStat in transformations:
+		for x in lineStatusDict[chilStat]:
+			allTextOnPage[x][-1] = parStat
+		lineStatusDict[parStat].extend(lineStatusDict[chilStat].copy())
+		del lineStatusDict[chilStat]
+		del statusBBoxDict[chilStat]
+
+	#Make each group a distinct color
+	allStatuses = list(set(lineStatusDict.keys()))
+	allStatuses.sort()
+	norm = mpl.colors.Normalize(vmin=0, vmax=len(allStatuses))
+	cmap = cm.jet
+	mss = cm.ScalarMappable(norm=norm, cmap=cmap)
+
+	#Plot each text block with the group's color
 	pageSize = page.mediabox
 	thresh_image = 255 * np.ones(shape=(pageSize[2], pageSize[3], 3), dtype=np.uint8)
-	curPageText = OrderedDict()
 
-
+	groupColors = {}
 	for currentLine in allTextOnPage:
-		currentLine[0] = currentLine[0].replace("'e","e").replace("'a","a")
-		#Line number removal
-		#if prog.match(currentLine[0]) is None:
 		xy0 = (math.floor(currentLine[1][0]), math.floor(currentLine[1][1]))
 		xy1 = (math.floor(currentLine[1][2]), math.floor(currentLine[1][3]))
-		thresh_image = cv2.rectangle(thresh_image, xy0, xy1, (0,0,0), -1)
-		LineY0 = math.floor((currentLine[1][1] // 10) * 10)
-		addToDict(curPageText,LineY0,currentLine)
+		#assign a color based on group
+		color = mss.to_rgba(allStatuses.index(currentLine[-1]))
+		color = color[:3]
+		color = [math.floor(x*255) for x in color]
+		groupColors[currentLine[-1]] = color
+		thresh_image = cv2.rectangle(thresh_image, xy0, xy1, color, -1)
+	
+	#Show the bounding boxes of each group
+	for statusX0,statusY0,statusX1,statusY1 in statusBBoxDict.values():
+		xy0 = (math.floor(statusX0),math.floor(statusY0))
+		xy1 = (math.floor(statusX1),math.floor(statusY1))
+		green = (0,255,0)
+		thresh_image = cv2.rectangle(thresh_image, xy0, xy1, green, 2)
 
-	# contourIm = cv2.cvtColor(thresh_image, cv2.COLOR_RGB2GRAY)
-	# contours, hierarchy = cv2.findContours(contourIm, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-	# cv2.drawContours(thresh_image, contours, -1, (0,255,0), 3)
+	print("~~~~ Color Dict ~~~~~~")
+	print(groupColors)
+	print("~~~~~~~~~~~~~~~~~~~~~~")
+	print("")
+	#Store what we've learned
+	documentParsed[curPage] = [allTextOnPage, lineStatusDict ,statusBBoxDict]
+	#So we now figure out which group
+	#each link is inside and only look at those groups
+	for uri in urisOnPage:
+		for posO in linksDict[uri].positions:
+			for statusV, bboxGroup in statusBBoxDict.items():
+				bboxLink = posO.getBBox()
+				if (bboxGroup[0] < bboxLink[0]) and (bboxGroup[1] < bboxLink[1]) and (bboxGroup[2] > bboxLink[2]) and (bboxGroup[3] > bboxLink[3]):
+					print("Inline text for ",uri," is in group ",statusV)
+					print(f"Link Position BBox {bboxLink} and group BBox {bboxGroup}")
+					posO.setGroupId(statusV)
+	
 	plt.imshow(thresh_image)
 	plt.show()
-	sys.exit(0)
-	curPageText = OrderedDict(sorted(curPageText.items()))
-	#So the regular parser is really bad for this,
-	#Get rid of all the messiness and use our own
-	#stuff
-	documentParsed[curPage] = curPageText
-	curPageKeys = list(curPageText.keys())
-	curPageKeys.sort()
+	for groupNum, linesIndces in lineStatusDict.items():
+		print("")
+		print(f"Looking at group {groupNum}")
+		print("=============================================")
+		curPageText = OrderedDict()
+		for lineIndex in linesIndces:
+			currentLine = allTextOnPage[lineIndex]
+			LineY0 = math.floor((currentLine[1][1] // 10) * 10)
+			addToDict(curPageText,LineY0,currentLine)
+		curPageText = OrderedDict(sorted(curPageText.items()))
+		for ggk,ggv in curPageText.items():
+			print(f"{ggk} : {[x[0] for x in ggv]}")
+		curPageKeys = list(curPageText.keys())
+		curPageKeys.sort()
+		for uri in urisOnPage:
+			for posO in linksDict[uri].positions:
+				if page.pageid != posO.getPageId() and posO.getGroupId() != groupNum:
+					continue
+				print("-------------------")
+				print(f"{uri} is in this group")
+				print("--------------------")
+				posObb = posO.getBBoxObj()
+				boxY = math.floor(posObb.y0)
+				boxX = math.floor(posObb.x0)
+				boxUX = math.floor(posObb.x1)
+				smallKey = 9999999
+				for yb in curPageKeys:
+					if boxY % 10 != 0:
+						if yb > (boxY-10) and yb < smallKey:
+							smallKey = yb
+					else:
+						if yb >= boxY and yb <= smallKey:
+							smallKey = yb
+				if smallKey == 9999999:
+					smallKey = max(curPageKeys)
+				print(boxY, " -> ", smallKey)
+				lineOs = curPageText[smallKey]
+				for lineP in lineOs:
+					lineX0 = math.floor(lineP[1][0])
+					lineX1 = math.floor(lineP[1][2])
+					charWidth = math.floor(lineP[2])
+					lineLen = len(lineP[0])
+					if (lineX0 <= (boxX+1)) and ((boxUX-1) <= lineX1):
+						#Now that we found the correct line, we must pull out the
+						#text, to do this we approximate the start and end of the
+						#substring, then find the next closest whitespace to those
+						#approximations
+						reSpaceF = re.finditer("\s+", lineP[0])
+						spaceIndes = [space.start() for space in reSpaceF]
+						spaceIndes.sort()
+						startInd = max((abs(boxX - lineX0) // charWidth),0)
+						endInd = min((abs(boxUX - lineX0) // charWidth) + 1,lineLen)
+						spaceIndes.insert(0, 0)
+						spaceIndes.append(lineLen)
+						closestStart = -999999
+						closestEnd = 999999
+						for ind in spaceIndes:
+							if ind >= endInd and ind < closestEnd:
+								closestEnd = ind
+							if ind <= startInd and ind > closestStart:
+								closestStart = ind
+						inlineTextB = lineP[0][closestStart:closestEnd]
+						if inlineTextB == "":
+							inlineTextB = lineP[0]
+						linksDict[uri].addAssocText(inlineTextB)
+						linksDict[uri].increaseText()
 	for uri in urisOnPage:
-		possibleLines = []
-		foundInlineText = False
-		for posO, pageId in linksDict[uri].positions:
-			if pageId != page.pageid:
-				continue
-			boxY = min(math.floor(posO.y0),math.floor(posO.y1))
-			boxX = min(math.floor(posO.x0),math.floor(posO.x1))
-			boxUX = max(math.floor(posO.x0),math.floor(posO.x1))
-			smallKey = 9999999
-			for yb in curPageKeys:
-				if boxY % 10 != 0:
-					if yb > (boxY-10) and yb < smallKey:
-						smallKey = yb
-				else:
-					if yb >= boxY and yb <= smallKey:
-						smallKey = yb
-			#print(boxY, " -> ", smallKey)
-			lineOs = curPageText[smallKey]
-			for lineP in lineOs:
-				lineX0 = math.floor(lineP[1][0])
-				lineX1 = math.floor(lineP[1][2])
-				charWidth = math.floor(lineP[2])
-				lineLen = len(lineP[0])
-				if (lineX0 <= (boxX+1)) and ((boxUX-1) <= lineX1):
-					#Now that we found the correct line, we must pull out the
-					#text, to do this we approximate the start and end of the
-					#substring, then find the next closest whitespace to those
-					#approximations
-					reSpaceF = re.finditer("\s+", lineP[0])
-					spaceIndes = [space.start() for space in reSpaceF]
-					spaceIndes.sort()
-					startInd = max((abs(boxX - lineX0) // charWidth),0)
-					endInd = min((abs(boxUX - lineX0) // charWidth) + 1,lineLen)
-					spaceIndes.insert(0, 0)
-					spaceIndes.append(lineLen)
-					closestStart = -999999
-					closestEnd = 999999
-					for ind in spaceIndes:
-						if ind >= endInd and ind < closestEnd:
-							closestEnd = ind
-						if ind <= startInd and ind > closestStart:
-							closestStart = ind
-					inlineTextB = lineP[0][closestStart:closestEnd]
-					if inlineTextB == "":
-						inlineTextB = lineP[0]
-					possibleLines.append(inlineTextB)
-					linksDict[uri].addAssocText(inlineTextB)
-					linksDict[uri].increaseText()
-					foundInlineText = True
-		if not foundInlineText:
-			print("Error! No inline text found for ",uri, " at ",posO, " please input the inline citation")
+		foundTT = linksDict[uri].getAllText()
+		print(uri," : ", foundTT)
+		if len(foundTT) == 0:
+			print("Error! No inline text found for ",uri," please input the inline citation")
 			ansss = input(">")
-			linksDict[uri].addAssocText(inlineTextB)
+			linksDict[uri].addAssocText(ansss)
 			linksDict[uri].increaseText()
+	sys.exit(0)
 
 #The destinations of the links in the link object are
 #names which reference destinations in the document catalog
